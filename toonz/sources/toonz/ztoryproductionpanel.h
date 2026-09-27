@@ -129,8 +129,13 @@ private:
   // scheda Breakdown: due copie divergono, e la seconda dimentica il
   // filtro .tnz dei personaggi.
   bool linkAssetFileInteractive(int assetIndex);
+  // The link dot + tooltip on an asset's name cell (see the .cpp).
+  void showAssetLink(QTableWidgetItem *item, const Asset &a,
+                     QHash<QString, QFileInfoList> *dirCache);
   // Il PSD da riggare di un personaggio (importato alla creazione della sua scena).
   bool linkAssetRigPsdInteractive(int assetIndex);
+  // Renames a nearly-matching file to the asset's exact name (asks first).
+  void renameAssetFile(int row, const QString &file);
   // Opzioni PSD di UN asset. Registra solo cio' che differisce dal
   // default di progetto, cosi' cambiare il default continua ad arrivare
   // qui: salvare anche i campi uguali li congelerebbe.

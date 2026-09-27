@@ -61,6 +61,8 @@
 #include <QProgressBar>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <QPainter>
+#include <QIcon>
 
 #include <cassert>
 
@@ -1574,6 +1576,45 @@ bool ZtoryProductionPanel::editAssetPsdOptions(int assetIndex) {
   return true;
 }
 
+// Ztoryc: renames a file found by a nearly-matching name to the asset's exact
+// name, so the folder convention finds it (Franco, 2026-09-27). Asks first:
+// scenes that LOAD the file (point at it instead of copying it) would look
+// for the old name and lose it.
+void ZtoryProductionPanel::renameAssetFile(int row, const QString &file) {
+  ZtoryModel *m = ZtoryModel::instance();
+  if (row < 0 || row >= m->assetCount()) return;
+  const Asset a = m->assets()[row];
+  const QFileInfo fi(file);
+  if (a.name.contains(QRegularExpression("[/\\\\:*?\"<>|]"))) {
+    DVGui::warning(tr("«%1» cannot be a file name: link the file instead.")
+                       .arg(a.name));
+    return;
+  }
+  const QString target = fi.absolutePath() + "/" + a.name +
+                         (fi.suffix().isEmpty() ? QString() : "." + fi.suffix());
+  if (QFileInfo::exists(target)) {
+    DVGui::warning(tr("«%1» already exists: link the file instead.")
+                       .arg(QFileInfo(target).fileName()));
+    return;
+  }
+  QString question = tr("Rename «%1» to «%2»?")
+                         .arg(fi.fileName(), QFileInfo(target).fileName());
+  if (m->effectiveImportPolicy(a).mode == AssetImportPolicy::Load)
+    question += "\n\n" +
+                tr("%1 comes into the shots by LOAD, i.e. pointing at this file: "
+                   "shots already exported would look for the old name and "
+                   "lose it. Linking the file as it is avoids that.")
+                    .arg(a.name);
+  // «Cancel» is the default: Enter pressed without reading renames nothing.
+  if (DVGui::MsgBox(question, tr("Rename"), tr("Cancel"), 1) != 1) return;
+  if (!QFile::rename(file, target)) {
+    DVGui::warning(tr("Could not rename «%1».").arg(fi.fileName()));
+    return;
+  }
+  rebuildAssets();
+  rebuildBreakdown();
+}
+
 // Ztoryc: il PSD da riggare di un personaggio (Franco, 2026-09-26). Si parte
 // dalla cartella dei model sheet, dove i disegni dei personaggi stanno.
 bool ZtoryProductionPanel::linkAssetRigPsdInteractive(int assetIndex) {
@@ -1973,6 +2014,7 @@ QWidget *ZtoryProductionPanel::buildBreakdownTab() {
 void ZtoryProductionPanel::rebuildBreakdown() {
   if (!m_breakdownTable) return;
   ZtoryModel *m = ZtoryModel::instance();
+  QHash<QString, QFileInfoList> breakdownDirCache;  // each folder listed once
 
   m_breakdownTable->clear();
   // ⚠️ La colonna «Storyboard» non e' un di piu'. Un progetto ha piu' file di
@@ -2041,11 +2083,19 @@ void ZtoryProductionPanel::rebuildBreakdown() {
       auto *fileItem = new QTableWidgetItem();
       if (found) {
         QString why;
-        const QString path = m->resolveAssetFile(*found, &why);
+        bool isNear = false;
+        const QString path =
+            m->resolveAssetFile(*found, &why, &breakdownDirCache, &isNear);
         if (!path.isEmpty()) {
           fileItem->setText(QFileInfo(path).fileName());
-          fileItem->setToolTip(path);
-          fileItem->setForeground(QBrush(QColor("#22D160")));
+          fileItem->setToolTip(
+              isNear ? path + "\n\n" +
+                         QObject::tr("The file's name differs from the asset's: "
+                                     "rename it or link it (Assets tab, "
+                                     "right-click).")
+                   : path);
+          fileItem->setForeground(
+              QBrush(QColor(isNear ? "#3273DC" : "#22D160")));
         } else {
           fileItem->setText(why);
           fileItem->setToolTip(
@@ -2099,6 +2149,51 @@ QWidget *ZtoryProductionPanel::buildAssetsTab() {
   return w;
 }
 
+// Ztoryc: whether an asset has its file, at a glance (Franco, 2026-09-27) —
+// a dot beside the name, the details in the tooltip. Green: it has its file,
+// linked by hand or found by folder + name (the tooltip says which — the
+// rule is strict enough that telling them apart by colour was noise, Franco
+// 2026-09-27); red: no file, the export would skip it.
+// A dot and not a column: the task columns' indexes are used in three places.
+static QIcon linkDot(const QColor &c) {
+  QPixmap pm(12, 12);
+  pm.fill(Qt::transparent);
+  QPainter p(&pm);
+  p.setRenderHint(QPainter::Antialiasing);
+  p.setPen(Qt::NoPen);
+  p.setBrush(c);
+  p.drawEllipse(2, 2, 8, 8);
+  return QIcon(pm);
+}
+
+void ZtoryProductionPanel::showAssetLink(QTableWidgetItem *item, const Asset &a,
+                                         QHash<QString, QFileInfoList> *dirCache) {
+  ZtoryModel *m = ZtoryModel::instance();
+  QString why;
+  bool isNear = false;
+  const QString file = m->resolveAssetFile(a, &why, dirCache, &isNear);
+  QString tip;
+  if (file.isEmpty()) {
+    item->setIcon(linkDot(QColor("#FF3860")));
+    tip = tr("No file — the export skips it: %1").arg(why);
+  } else if (isNear) {
+    // Blue: found, but by a name that is only NEARLY the asset's.
+    item->setIcon(linkDot(QColor("#3273DC")));
+    tip = tr("Used, but %1.\nRight-click: rename the file, or link it as it "
+             "is.")
+              .arg(why);
+  } else {
+    item->setIcon(linkDot(QColor("#22D160")));
+    tip = a.filePath.isEmpty() ? tr("Found by folder and name: %1").arg(file)
+                               : tr("Linked: %1").arg(file);
+  }
+  if (ZtoryModel::isCharacterType(a.type))
+    tip += "\n" + (a.rigPsdPath.isEmpty()
+                        ? tr("No PSD to rig linked.")
+                        : tr("PSD to rig: %1").arg(m->resolveAssetRigPsd(a)));
+  item->setToolTip(tip);
+}
+
 void ZtoryProductionPanel::rebuildAssets() {
   if (!m_assetTable) return;
   ZtoryModel *m   = ZtoryModel::instance();
@@ -2115,6 +2210,7 @@ void ZtoryProductionPanel::rebuildAssets() {
   headers += m_assetTaskCols;
   m_assetTable->setHorizontalHeaderLabels(headers);
 
+  QHash<QString, QFileInfoList> dirCache;  // each category folder listed once
   for (int i = 0; i < m->assetCount(); i++) {
     const Asset &as = m->assets()[i];
     auto *typeItem  = new QTableWidgetItem(as.type);
@@ -2123,6 +2219,7 @@ void ZtoryProductionPanel::rebuildAssets() {
     m_assetTable->setItem(i, 0, typeItem);
     auto *nameItem = new QTableWidgetItem(as.name);
     nameItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsEditable);
+    showAssetLink(nameItem, as, &dirCache);
     m_assetTable->setItem(i, 1, nameItem);
     // Only the task types in THIS asset's type pipeline are editable cells; the
     // rest (columns belonging to other types) are blanked and disabled.
@@ -2242,6 +2339,18 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
             .suffix()
             .compare("psd", Qt::CaseInsensitive) == 0)
       psdAct = rowMenu.addAction(QObject::tr("PSD import options…"));
+    // A file found by a name that is only nearly the asset's (the blue dot).
+    QAction *renameAct = nullptr, *linkAsIsAct = nullptr;
+    bool isNear = false;
+    const QString nearFile = m->resolveAssetFile(a, nullptr, nullptr, &isNear);
+    if (isNear) {
+      rowMenu.addSeparator();
+      const QFileInfo nf(nearFile);
+      renameAct = rowMenu.addAction(
+          QObject::tr("Rename the file to «%1.%2»").arg(a.name, nf.suffix()));
+      linkAsIsAct = rowMenu.addAction(
+          QObject::tr("Link «%1» as it is").arg(nf.fileName()));
+    }
 
     rowMenu.addSeparator();
     const AssetImportPolicy eff = m->effectiveImportPolicy(a);
@@ -2266,6 +2375,17 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
     QAction *ch = rowMenu.exec(m_assetTable->viewport()->mapToGlobal(pos));
     if (!ch) return;
     if (ch == psdAct) { editAssetPsdOptions(row); return; }
+    if (ch == linkAsIsAct) {
+      m->setAssetFilePath(row, nearFile);
+      persistAssets();
+      rebuildAssets();
+      rebuildBreakdown();
+      return;
+    }
+    if (ch == renameAct) {
+      renameAssetFile(row, nearFile);
+      return;
+    }
     if (ch == rigLinkAct) { linkAssetRigPsdInteractive(row); return; }
     if (ch == rigClearAct) {
       m->setAssetRigPsd(row, QString());

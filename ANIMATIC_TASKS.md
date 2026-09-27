@@ -1550,6 +1550,19 @@ bocca sul viso), che riempie in automatico il `DESTINAZIONE` dello script.
 
 ## 🗂️ Kitsu / produzione
 
+### 🎯 DECISO 2026-09-27 — piu' props nello stesso PSD: il file entra intero, come un set
+
+Franco: niente nome di livello/gruppo per prop («evitiamo di dover essere troppo pignoli»). I props
+si collegano tutti allo stesso PSD; all'export, in ogni shot il file entra UNA volta (i doppioni
+sono gia' scartati in `ztoryImportShotAssets`) e INTERO, anche coi livelli dei props che quello shot
+non ha nel breakdown. Valgono le opzioni PSD del primo asset di quel file nel breakdown.
+Segnale del collegamento nella scheda Assets (27/09): pallino verde = ha il suo file (a mano o per
+cartella+nome, il tooltip dice quale), blu = trovato con un nome QUASI uguale (scritto in altro modo —
+maiuscole, spazi, trattini, accenti — o una lettera di differenza all'interno; mai un pezzo in piu'
+come _v03, mai una cifra, mai il nome o il file di un altro asset): usato anche all'export, e col
+clic destro «Rename the file…» o «Link … as it is»; rosso = nessun file. Idea di Franco. Da fare
+(facoltativo): mostrare i quasi-uguali anche nel dialogo di controllo prima dell'export.
+
 ### Automazione degli status e Sync con Kitsu — cio' che resta (il fatto e' nell'archivio)
 
 Fatto e collaudato il 26-27/09 (commit `1f51dd295`): regole in ZtoryTaskFlow, push sicuro, Sync a

@@ -148,7 +148,8 @@ ZtoryImportedAssets ztoryImportShotAssets(const QString &shotUuid,
     const Asset *a = m->assetByUuid(be.assetUuid);
     if (!a) continue;
     QString why;
-    const QString file = m->resolveAssetFile(*a, &why);
+    bool isNear = false;
+    const QString file = m->resolveAssetFile(*a, &why, nullptr, &isNear);
     if (file.isEmpty()) {
       // Il controllo di prima l'ha gia' mostrato all'utente, che ha scelto di
       // proseguire: qui basta lasciarne traccia.
@@ -186,7 +187,8 @@ ZtoryImportedAssets ztoryImportShotAssets(const QString &shotUuid,
     } else {
       toLoad.push_back(fp);
     }
-    res.log << QObject::tr("%1 (%2) ← %3").arg(a->name, a->type, file);
+    res.log << QObject::tr("%1 (%2) ← %3").arg(a->name, a->type, file) +
+                   (isNear ? QObject::tr("  (%1)").arg(why) : QString());
   }
 
   if (toLoad.empty() && toImport.empty() && psdFiles.isEmpty()) return res;

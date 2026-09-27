@@ -1,6 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QPixmap>
+#include <QFileInfo>
 #include <QString>
 #include <QStringList>
 #include <QMap>
@@ -509,7 +510,19 @@ public:
   //      «macchina.tlv» e «macchina.psd» e' un errore che si vede solo in
   //      render, giorni dopo.
   // Volutamente niente prefissi/suffissi: «macchina» non pesca «macchina_v03».
-  QString resolveAssetFile(const Asset &a, QString *why = nullptr) const;
+  // `dirCache` (optional): category folders already listed, reused — the
+  // asset table resolves every asset at each redraw, and without it lists
+  // the same folder once per asset (2026-09-27).
+  // `nearMatch` (optional): set when the file was found with a name that is
+  // NEARLY the asset's (see assetNameKey / the rule in the .cpp) — it is used,
+  // and `why` says the name differs, so the user can rename or link it.
+  QString resolveAssetFile(const Asset &a, QString *why = nullptr,
+                           QHash<QString, QFileInfoList> *dirCache = nullptr,
+                           bool *nearMatch = nullptr) const;
+  // The name as the near-match compares it: lower case, no accents, letters
+  // and digits only. «LIBRO FAVOLE», «libro_favole», «Libro-Favole» →
+  // «librofavole».
+  static QString assetNameKey(const QString &name);
 
   // ── Dialoghi: chi dice cosa ────────────────────────────────────────────────
   // Estrae le battute dal testo di un pannello, riconoscendo le due forme in cui

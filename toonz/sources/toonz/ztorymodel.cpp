@@ -35,6 +35,7 @@
 
 #include "toonz/tproject.h"
 #include <QDir>
+#include <QSet>
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QFileInfo>
@@ -647,7 +648,39 @@ const Asset *ZtoryModel::assetByName(const QString &name) const {
   return nullptr;
 }
 
-QString ZtoryModel::resolveAssetFile(const Asset &a, QString *why) const {
+QString ZtoryModel::assetNameKey(const QString &name) {
+  const QString decomposed = name.normalized(QString::NormalizationForm_D);
+  QString key;
+  for (const QChar &c : decomposed)
+    if (c.isLetterOrNumber()) key += c.toLower();  // accents' marks dropped
+  return key;
+}
+
+// One typo apart: one letter replaced, or one letter added/missing INSIDE the
+// name. Never at the ends and never a digit: «macchina2», «prop1»/«prop2»,
+// «macchinav» (from «_v03») are other things, not typos (2026-09-27).
+static bool oneTypoApart(const QString &a, const QString &b) {
+  if (a.size() == b.size()) {
+    int diff = -1;
+    for (int i = 0; i < a.size(); ++i)
+      if (a[i] != b[i]) {
+        if (diff >= 0) return false;
+        diff = i;
+      }
+    return diff >= 0 && !a[diff].isDigit() && !b[diff].isDigit();
+  }
+  const QString &lng = a.size() > b.size() ? a : b;
+  const QString &sht = a.size() > b.size() ? b : a;
+  if (lng.size() != sht.size() + 1) return false;
+  for (int i = 1; i + 1 < lng.size(); ++i)  // inside only
+    if (!lng[i].isDigit() && lng.left(i) + lng.mid(i + 1) == sht) return true;
+  return false;
+}
+
+QString ZtoryModel::resolveAssetFile(const Asset &a, QString *why,
+                                     QHash<QString, QFileInfoList> *dirCache,
+                                     bool *nearMatch) const {
+  if (nearMatch) *nearMatch = false;
   auto fail = [&](const QString &msg) {
     if (why) *why = msg;
     return QString();
@@ -673,14 +706,59 @@ QString ZtoryModel::resolveAssetFile(const Asset &a, QString *why) const {
   // uno a caso e' peggio che non trovarlo — l'errore si vedrebbe solo in
   // render, giorni dopo.
   QStringList hits;
-  const QFileInfoList entries =
-      QDir(dir).entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+  QFileInfoList listed;
+  if (!dirCache || !dirCache->contains(dir)) {
+    listed = QDir(dir).entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+    if (dirCache) dirCache->insert(dir, listed);
+  }
+  const QFileInfoList &entries = dirCache ? (*dirCache)[dir] : listed;
+  // Both names in the same Unicode form: macOS often stores file names
+  // decomposed (NFD), an asset name typed in the app is composed (NFC) —
+  // «Città» would not match itself, and turn blue for nothing.
+  const QString nameNfc = a.name.normalized(QString::NormalizationForm_C);
   for (const QFileInfo &fi : entries)
-    if (fi.completeBaseName().compare(a.name, Qt::CaseInsensitive) == 0)
+    if (fi.completeBaseName()
+            .normalized(QString::NormalizationForm_C)
+            .compare(nameNfc, Qt::CaseInsensitive) == 0)
       hits << fi.absoluteFilePath();
 
-  if (hits.isEmpty())
+  // Nearly the name (Franco, 2026-09-27): written another way — case,
+  // spaces, dashes, underscores, accents — or one typo apart. Used, and said,
+  // so it can be renamed or linked. A piece added (_v03, _old) is not near.
+  if (hits.isEmpty()) {
+    const QString key = assetNameKey(a.name);
+    // Files that belong to ANOTHER asset — its name, or its link — are never
+    // near for this one: «LIBRI» must not take «LIBRO.psd» when LIBRO is a
+    // prop of its own (one letter apart, two different things).
+    QSet<QString> othersKeys, othersFiles;
+    for (const Asset &o : m_assets) {
+      if (o.uuid == a.uuid) continue;
+      othersKeys.insert(assetNameKey(o.name));
+      if (!o.filePath.isEmpty())
+        othersFiles.insert(QFileInfo(o.filePath).absoluteFilePath().toLower());
+    }
+    QStringList nearHits;
+    for (const QFileInfo &fi : entries) {
+      const QString k = assetNameKey(fi.completeBaseName());
+      if (k.isEmpty() || key.isEmpty()) continue;
+      if (othersKeys.contains(k) ||
+          othersFiles.contains(fi.absoluteFilePath().toLower()))
+        continue;
+      if (k == key || (key.size() >= 5 && oneTypoApart(k, key)))
+        nearHits << fi.absoluteFilePath();
+    }
+    if (nearHits.size() == 1) {
+      if (why)
+        *why = tr("the file's name differs: «%1»")
+                   .arg(QFileInfo(nearHits.first()).fileName());
+      if (nearMatch) *nearMatch = true;
+      return nearHits.first();
+    }
+    if (nearHits.size() > 1)
+      return fail(tr("%1 files with a name like «%2» in %3 — link the right one")
+                      .arg(nearHits.size()).arg(a.name, dir));
     return fail(tr("no file named «%1» in %2").arg(a.name, dir));
+  }
   // 3. Ambiguo: NON si indovina. Due file con lo stesso nome e estensione
   //    diversa (macchina.tlv e macchina.psd) sono una scelta dell'utente, non
   //    nostra; si chiede il legame esplicito.

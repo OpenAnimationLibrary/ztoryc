@@ -19,6 +19,10 @@ cima all'ordine di lavoro (Puppetoonz al prossimo episodio). Prima applicazione 
   del fotogramma corrente va sul task Kitsu nel commento che mette WFA. Collaudato.
 - AGENTS.md: regole «Riordinare quello che si tocca» e «Spiegare il diff a Franco»; `ztoryc-reviewer`
   ha la modalita' «debito».
+- **Scheda Assets: si vede se un asset ha il suo file** (pallino verde/blu/rosso, tooltip col
+  dettaglio) e **i nomi quasi uguali** vengono riconosciuti (idea di Franco): usati, segnalati in blu,
+  e col clic destro si rinomina il file o lo si collega cosi' com'e'. Piu' props nello stesso PSD: il
+  file entra intero, una volta per shot (decisione di Franco: niente livelli per prop).
 
 ### Fixed
 - Un **push manuale** riportava a WFA dei Done appena messi dal supervisore su Kitsu (incidente vero;
