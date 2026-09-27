@@ -1951,10 +1951,20 @@ void ZtoryThumbnailCanvas::askAboutRecoveredWork(const QString &work) {
   static QSet<QString> asked;
   if (asked.contains(work)) return;
   asked.insert(work);
-  // Not from inside sceneSwitched: the scene is still being loaded.
+  // Not from inside sceneSwitched: the scene is still being loaded. And not
+  // while another question is open: the scene's own recovery (ZtoryRecovery)
+  // asks at the same moment, and the two dialogs came up one on top of the
+  // other (Franco, 2026-09-27, after a power cut). No time limit, unlike the
+  // libraries' questions: dropping this one would leave the recovered
+  // drawings on screen without anyone having chosen to keep them.
   QPointer<ZtoryThumbnailCanvas> self(this);
   const QString key = m_persistKey;
-  QTimer::singleShot(0, this, [self, work, key]() {
+  auto *wait        = new QTimer(this);
+  wait->start(250);
+  connect(wait, &QTimer::timeout, this, [self, work, key, wait]() {
+    if (QApplication::activeModalWidget()) return;
+    wait->stop();
+    wait->deleteLater();
     if (!self || self->m_persistKey != key || !QDir(work).exists()) return;
     const QDateTime when =
         QFileInfo(work + "/_ztorythumbs_grid.txt").lastModified();
