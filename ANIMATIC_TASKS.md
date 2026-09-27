@@ -861,9 +861,8 @@ Milestone:
       bocche↔fonemi salvata sul personaggio resta un elenco di sigle. Progetto
       pronto nella sezione «IL PERSONAGGIO COME OGGETTO»: sidecar `.ztoryc` con
       `role="character"`, riferimento per NOME DI LIVELLO + fotogramma.
-   2. **Libreria di pose + ritorno in libreria** — «pubblica in libreria» /
-      «prendi dalla libreria», con rifiuto se incompatibile e v2 se la struttura
-      diverge (decisione di Franco, vedi sezione «IL RITORNO IN LIBRERIA»).
+   2. ✅ **Libreria di pose + ritorno in libreria** — FATTO il 2026-09-27
+      (`e306a47bb`, archivio): pose, correttive, clip, bocche.
    3. **Template di scheletro con proporzioni standard, e compensazione**
       (idea di Franco, 2026-08-16): *«creare un template di scheletro con delle
       proporzioni standard; quando viene riadattato sul personaggio, facendo la
@@ -1309,57 +1308,11 @@ quell'assegnazione sul personaggio e ripescarla** — non l'assegnazione in se'.
 
 ---
 
-### ♻️ IL RITORNO IN LIBRERIA — le pose create animando (Franco, 2026-08-16)
+### ♻️ IL RITORNO IN LIBRERIA — ✅ FATTO 2026-09-27 (`e306a47bb`), nell'archivio
 
-> *«Creo il personaggio e lo importo come sottoscena per animarlo nei vari shot,
-> animandolo però creo nuove pose e animazioni che potrebbero tornarmi utili, la
-> sua libreria si arricchisce: come aggiorniamo il file sorgente?»*
-
-🎯 **LA PARTE DIFFICILE E' GIA' RISOLTA, e non l'avevamo notato.** Da
-`include/ext/plasticskeletondeformation.h:289`:
-> «Deltas are stored **BY VERTEX NAME**, like keyframes are, and never by vertex
-> index: that is what lets an action be **copied to a skeleton whose internal
-> vertex numbering differs**.»
-
-Cioe' una `PoseAction` e' **portabile per costruzione**: si trapianta da una
-copia del personaggio a un'altra. E' esattamente il caso del ritorno in
-libreria, ed e' il problema che di solito costa caro. Manca solo il TRASPORTO.
-
-C'e' anche gia' il controllo di compatibilita': `m_skelIds` dice su quali
-scheletri una posa e' lecita (riga 330). Una posa registrata sul frontale
-replicata sul profilo «lands somewhere nobody authored» — quindi il travaso non
-puo' essere cieco.
-
-**Come farlo, quando si riapre:**
-- ⚠️ **Esplicito e a senso unico, MAI automatico.** Il personaggio nello shot e'
-  una COPIA (l'import copia i file, verificato: 23 MB di PSD per shot), quindi
-  e' un fork. Una sincronizzazione automatica propagherebbe anche gli errori e
-  le pose sbagliate a tutta la produzione.
-- Due comandi simmetrici: **«pubblica in libreria»** dallo shot (scegli quali
-  azioni, finiscono nel personaggio) e **«prendi dalla libreria»** nello shot.
-  E' il modello dei template di Harmony, ed e' come ragiona un animatore:
-  «questa me la salvo».
-- Le pose vanno nel sidecar `role="character"` (vedi la sezione sopra), non
-  dentro la scena: cosi' si leggono senza aprire il personaggio.
-- **I CICLI di animazione sono un'altra cosa**, piu' grossa: non un insieme di
-  valori ma curve nel tempo su piu' parametri. Da progettare a parte — una posa
-  e' uno stato, un ciclo e' una clip. Non trattarli come lo stesso oggetto.
-✅ **DECISO da Franco (2026-08-16) — divergenza strutturale**: *«il salvataggio
-sul character sorgente viene RIFIUTATO se non e' compatibile; se e' diverso
-strutturalmente potremmo esportarlo come una v2 dello stesso personaggio»*.
-Buona regola: trasforma un caso d'errore in un atto deliberato, invece di
-lasciare all'utente una fusione a meta'.
-
-Il controllo di compatibilita' ha una definizione CONCRETA, e la si ha gratis
-perche' i delta sono per nome di vertice:
-- lo scheletro di destinazione contiene **tutti** i nomi citati dalla posa →
-  compatibile, si accetta (se ne ha altri in piu' restano fermi: la posa e'
-  PART, tocca solo i suoi);
-- ne manca anche uno → **rifiuto**, e si propone la **v2 del personaggio**.
-
-**Il flusso, come lo ha descritto Franco:** animi nello shot → comando
-«pubblica in libreria» → scegli quali azioni registrate → controllo → finiscono
-nella libreria del personaggio sorgente, disponibili da li' in poi in ogni shot.
+Libreria di pose e correttive (`.zrig`), v2 del personaggio, clip di animazione (`.zclip`),
+libreria delle bocche: progetto e realizzazione in ANIMATIC_TASKS_ARCHIVE_2026-09.md.
+Resta aperta la voce qui sotto, in «Kitsu / produzione»: domande accodate a ogni salvataggio.
 
 ---
 
@@ -1575,6 +1528,22 @@ deduzione; all'export non e' fra i mancanti. Non per i personaggi. Un collegamen
 ricompare togliendo il segno; collegare un file toglie il segno.
 Voce di lavoro dalla review: il blocco <assets> dei .ztoryc vecchi (storyboardpanel ~3663) ricostruisce
 gli asset senza filePath/rigPsd/noFile — verificare che production.ztrack li rimetta dopo.
+
+### 🆕 2026-09-27b — aperti dopo casting/anteprime, shot autonomo e librerie
+
+- **Le domande delle librerie si accodano** (review 27/09d, punto 8): ogni salvataggio crea un
+  timer (`ztorymouthlibrary.cpp` ~411, idem ztoriglibrary); tre salvataggi con una pubblicazione
+  rifiutata = tre dialoghi di fila, e la scena si legge quando scatta il timer. Serve un flag
+  «offerta gia' in coda» per tipo.
+- **Da collaudare**: Insert Clip con «Keyframes follow exposure» attiva, chiavi+disegni e solo
+  chiavi, ⌘Z/⌘Y (corretto dopo la review, la corrente e' saltata prima della prova).
+- **Build Windows** da verificare (DVAPI aggiunto a PoseAction/MeshCorrective).
+- Costo da misurare: a ogni salvataggio/apertura con un personaggio si carica la sua .tnz e si fa
+  l'MD5 dei .mesh (`effectiveLibrary`).
+- Note di rilascio: una versione vecchia che risalva production.ztrack perde `castSynced` e
+  `previewSig` (il Sync rifa' le basi e ricarica le anteprime una volta).
+- **Da cancellare a mano (Franco)**: i vecchi .wav nella radice di extras e le copie vecchie in
+  extras/CS26_06ME_STB_NCP_V1.
 
 ### Automazione degli status e Sync con Kitsu — cio' che resta (il fatto e' nell'archivio)
 

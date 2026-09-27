@@ -1,3 +1,68 @@
+## [2026-09-27b] — casting e anteprime su Kitsu, shot esportato autonomo, librerie del personaggio (bocche, pose, clip), crash dei listener
+
+Seconda parte del 27/09, collaudata da Franco su CS26 episodio CS2606 (Messina).
+Commit `fa6bf998e` (crash listener), `268d5fd13` (Plastic/Animate tool), `e306a47bb` (il resto).
+Review 2026-09-27d: licenze OK; 2 bloccanti e 7 consigliati corretti prima del commit.
+
+### Added
+- **Casting su Kitsu (passo 5 del Sync)**: il breakdown di ogni shot va su Kitsu e le
+  CANCELLAZIONI si propagano (base per shot legata all'id Kitsu dello shot, `castSynced` nel
+  .ztrack). Shot fuori ambito, id doppi, asset sconosciuti: avvisi, niente scritture. Via il
+  pulsante «Pull breakdown from Kitsu»: fa tutto il Sync.
+- **Sync automatico** alla connessione con Kitsu.
+- **Anteprime degli asset su Kitsu (passo 6)**: dal file dell'asset (PSD/PNG/…; personaggi dal
+  PSD del rig o della scena), sul task in corso, come copertina; si ricaricano solo se il file
+  cambia (`previewSig`). Personaggi riggati: la copertina e' il render del Rigging se c'e'.
+  Lo status del task resta quello del server.
+- **Export: controllo dei PSD** prima dell'import (modo colore, 32 bit, file troncato, livelli
+  rovinati, nomi con il punto) e **import silenzioso**: nessun popup, vince il file piu' recente,
+  gli errori finiscono nel resoconto.
+- **Shot autonomo**: con «Import» tutto finisce in `+extras/<shot>/` del progetto — livelli,
+  PSD, `.zmouth` e anche i segmenti audio, pure con «Load». Lo shot si puo' mandare da solo a un
+  collaboratore esterno.
+- **Libreria delle bocche**: «Publish…» / «Update…» dei mouth set fra shot e scena del
+  personaggio, con domande al salvataggio e all'apertura («non chiedere piu'»).
+- **Libreria di pose e correttive** (`<scena>.zrig`): «Publish to Library…» / «Update from
+  Library…», differenze con tolleranza; se la struttura non combacia, v2 del personaggio,
+  «pubblica solo cio' che combacia» o scarta. Nella scena del personaggio le pose nuove entrano
+  da sole.
+- **Clip di animazione** (`<scena>_clips/*.zclip`): «Save Clip…» / «Insert Clip…»; all'inserimento
+  si sceglie chiavi+disegni o solo chiavi; l'inserimento sposta celle e chiavi successive,
+  percorso che continua o sul posto, velocita', ripetizioni, undo.
+
+### Fixed
+- **CRASH** cliccando sulla colonna della mesh (PlasticTool::onSelectionChanged): un
+  ToolOptionControl distrutto restava registrato come listener di una TProperty. Ora il
+  listener si deregistra da solo. Confermato da Franco.
+- **Blocco** su «Not now» aprendo una scena dal popup d'avvio: le domande delle librerie
+  aspettano che non ci siano finestre modali.
+- **Assign Mouth Drawings**: scriveva 44 fotogrammi su 303 (leggeva la colonna delle PAROLE) →
+  301/303; una destinazione per sotto-scena, un solo undo; pulsante Close; la punteggiatura non
+  prende piu' fotogrammi.
+- Il Board rinominava «sh010» la colonna del personaggio nelle scene shot.
+- Anteprime nere dei personaggi; set-main-preview rifiutato da Kitsu (400).
+- **Plastic tool**: Global Key ALL chiava anche il transform sul percorso IK a piu' colonne;
+  Keep Distance spento permette di allungare (salta l'IK); undo della chiave transform che
+  rimetteva la posa nuova.
+- **Animate tool**: l'undo con Global Key lasciava la chiave Plastic.
+- psdlib: file lasciato aperto se il caricamento di un livello fallisce.
+- Dalla review: link Windows (DVAPI su PoseAction/MeshCorrective), clip con «Keyframes follow
+  exposure» (chiavi spostate due volte), libreria illeggibile mai sovrascritta, .zrig/.zclip
+  rovinati letti con prudenza.
+
+### Upstream candidates
+- TProperty: listener mai deregistrati → puntatore pendente (crash). Diagnosticato sotto lldb
+  su Ztoryc, non verificato su Tahoma2D stock.
+- psdlib: `fclose` saltato se il caricamento di un livello lancia un'eccezione.
+
+### Notes
+- Da collaudare: Insert Clip con «Keyframes follow exposure» attiva (e' saltata la corrente
+  prima della prova); build Windows.
+- Una versione vecchia che risalva production.ztrack perde `castSynced` e `previewSig`:
+  da scrivere nelle note di rilascio.
+- Il Mac rallentato era CursorUIViewService (2,4 GB, 80% CPU) con la swap piena: chiuso, la
+  sessione grafica e' ripartita.
+
 ## [2026-09-27] — automazione degli status, Sync a tre vie con Kitsu, PSD da riggare, WFA con anteprima
 
 Due giorni (26 sera – 27/09) sulla produzione, collaudati da Franco su CS26 episodio CS2606, messo in
