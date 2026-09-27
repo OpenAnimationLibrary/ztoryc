@@ -419,6 +419,15 @@ Vale anche la sua indicazione complementare: **se controlli una cosa e non trovi
 errori evidenti, non intervenire** — riferire e fermare la modifica, non «già che
 ci sono» sistemare.
 
+### Riordinare quello che si tocca — REGOLA (Franco, 2026-09-26)
+
+Quando si mette mano a una parte di codice, a fine lavoro si lancia **`ztoryc-reviewer` in
+modalità «debito»** sui file toccati, per intero e non solo sul diff. Resta in sola lettura:
+propone. Le correzioni **piccole e sicure** si fanno subito, nella stessa sessione, con la
+spiegazione del diff a Franco e il suo collaudo; quelle **grosse** diventano una voce in
+ANIMATIC_TASKS. Niente riscritture complete: e' il riordino continuo per priorita' deciso il
+26/09 (prima i dati, poi i formati congelati, poi i moduli toccati dalle funzioni nuove).
+
 ### Spiegare il diff a Franco — REGOLA (Franco, 2026-09-26)
 
 E' il «binario A» di `~/ZtorYc/PIANO_STUDIO_CODICE.md`: Franco impara a leggere il

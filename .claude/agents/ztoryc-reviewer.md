@@ -35,6 +35,25 @@ Verifica:
    - la modifica tocca file che cambiano spesso in Tahoma2D? Segnala il rischio di conflitti futuri
      (utile: `git log --oneline v1.6.3..upstream/master -- <file>`).
 
+## Modalità «debito» (regola di Franco, 2026-09-26)
+
+Quando ti viene chiesta la modalità «debito», NON limitarti al diff: leggi per intero i file
+indicati (quelli su cui si è messo mano) e cerca il debito tecnico nelle parti toccate e in
+quelle collegate:
+- logica duplicata: formule o regole copiate in più punti, con varianti che divergono;
+- funzioni troppo lunghe (AGENTS.md: ~50 righe) e responsabilità mescolate (dati + interfaccia);
+- codice morto: funzioni senza chiamanti, rami mai eseguiti, campi scritti e mai letti;
+- stato globale fuori da `ZtoryModel`, nomi o valori scritti a mano che dovrebbero venire da
+  dati (task type e status si leggono dal server);
+- utility già esistenti nel codice che la parte toccata non riusa.
+
+Per ogni punto classifica la correzione:
+- **Subito** — piccola, locale, senza rischio di cambiare comportamento, verificabile a mano;
+- **Voce di lavoro** — più grande o rischiosa: va in ANIMATIC_TASKS, non si fa in coda a una
+  modifica. Dove non ci sono prove automatiche, un riordino si collauda solo a mano: tienine conto.
+Non proporre riscritture di file interi e non toccare codice stock Tahoma/OpenToonz per estetica.
+Resti in sola lettura: proponi, non modificare.
+
 Formato del report:
 - **Bloccanti** (da correggere prima del commit/push)
 - **Consigliati**

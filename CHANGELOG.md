@@ -1,3 +1,44 @@
+## [2026-09-27] — automazione degli status, Sync a tre vie con Kitsu, PSD da riggare, WFA con anteprima
+
+Due giorni (26 sera – 27/09) sulla produzione, collaudati da Franco su CS26 episodio CS2606, messo in
+cima all'ordine di lavoro (Puppetoonz al prossimo episodio). Prima applicazione della regola
+«riordinare quello che si tocca»: il revisore in modalita' «debito» dopo ogni giro.
+
+### Added
+- **ZtoryTaskFlow**: un solo punto per i cambi di status. L'app va solo avanti e non esce mai da
+  WFA/Done; un Done rende Ready il task dopo (shot E asset, anche dai pull); l'undo riprende anche i
+  cambi provocati. Nomi dei task insensibili alle maiuscole (i doppioni di CS2606 fusi al caricamento).
+- **Push sicuro** verso Kitsu (un task per volta, solo se Kitsu ha ancora lo status di partenza,
+  altrimenti vince Kitsu) e **push automatico** con interruttore, spento di default. Collaudato.
+- **Sync a tre vie, pulsante unico «⇄ Sync with Kitsu»** (idea di Franco): ogni task ricorda la sua
+  «base»; si mandano solo i cambi di Ztoryc, si prendono quelli di Kitsu, conflitto = vince Kitsu.
+  Via i quattro pulsanti Push/Pull. Il Sync vive in `ZtoryKitsuSync`, fuori dal tracker. Collaudato.
+- **PSD da riggare** sul personaggio, importato alla creazione della sua scena con le sue opzioni PSD
+  (o quelle di progetto). Collaudato («ottimo»).
+- **WFA con anteprima** alla chiusura della scena di un personaggio col Rigging in WIP: l'immagine
+  del fotogramma corrente va sul task Kitsu nel commento che mette WFA. Collaudato.
+- AGENTS.md: regole «Riordinare quello che si tocca» e «Spiegare il diff a Franco»; `ztoryc-reviewer`
+  ha la modalita' «debito».
+
+### Fixed
+- Un **push manuale** riportava a WFA dei Done appena messi dal supervisore su Kitsu (incidente vero;
+  Franco ha ripristinato i Done a mano) → la base e il Sync.
+- All'apertura di uno shot una seconda regola rimetteva lo **Storyboard in WIP**.
+- La creazione dei task degli asset toccava **gli asset di tutti gli episodi** del progetto Kitsu.
+- **Fill verso l'alto** partiva dalla scorciatoia del comando verso il basso (`a731855a7`).
+
+### Modified
+- «Character»/«Storyboard» in un posto solo; palette e elenco status condivisi; un parser dei tipi di
+  task; un import PSD; un invio del file d'anteprima; un accesso ai task nel modello.
+- Commit: `a731855a7` (Fill), `1f51dd295` (tutto il resto: i file sono condivisi fra gli argomenti).
+
+### Notes
+- Review: `reviews/2026-09-26b..d`, `2026-09-27_sync`, `2026-09-27b_aperti`, `2026-09-27c_sync-refactor`,
+  `2026-09-27_reviewer`, `2026-09-27_license` (OK).
+- Restano: le automazioni lato Kitsu (le inserisce Franco), «Rigging» come ruolo per tipo di asset, il
+  popup WFA da collaudare su Quit/cambio progetto, e le note di rilascio (una versione vecchia che
+  risalva il `.ztrack` perde `rigPsd` e le basi `synced`).
+
 ## [2026-09-26] — AI ed etica, README trasparente, audit del .ztoryc, piano di studio
 
 Sessione senza codice: una discussione sul vibe coding (partita da un thread anti-AI nel canale

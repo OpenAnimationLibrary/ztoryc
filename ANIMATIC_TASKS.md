@@ -38,8 +38,9 @@ chiuse da settimane**. Le cause, e la regola che ne esce:
 
 Ztoryc (storyboard, animatic, thumbs) · ZtoRig / personaggio · Puppetoonz ·
 Kitsu / produzione · Pipeline AI (Anymatix) · Blender · Infrastruttura.
-Kitsu, Anymatix e Blender oggi non hanno voci tecniche aperte: il loro
-stato e le prossime mosse sono nella ROADMAP.
+Anymatix e Blender oggi non hanno voci tecniche aperte: il loro stato e le
+prossime mosse sono nella ROADMAP. Kitsu ne ha una dal 2026-09-26 (automazione
+degli status).
 
 ---
 
@@ -198,7 +199,6 @@ il save a ogni apertura li ha ricontrollati la sessione principale sul codice).
   salvato (`ztorylipsyncdialog.cpp:162` senza `saveProjectDb`); manca `productionReloaded`.
 - **Bocche** (P6 a/b): l'autosave di Tahoma fa aprire da sola la finestra del nome del set; serve
   una guardia di rientro e nessuna finestra dentro `onSceneSaved`.
-- **Fill Up** (M4): legge ⌘ anche quando il comando parte da una scorciatoia utente con ⌘.
 - **Link anyway** (M5): lascia due asset sulla stessa scena.
 
 - **Repeat con Loop anche su celle+chiavi** — PROPOSTA, non decisa. Oggi il Loop
@@ -1547,6 +1547,26 @@ bocca sul viso), che riempie in automatico il `DESTINAZIONE` dello script.
 
 
 ---
+
+## 🗂️ Kitsu / produzione
+
+### Automazione degli status e Sync con Kitsu — cio' che resta (il fatto e' nell'archivio)
+
+Fatto e collaudato il 26-27/09 (commit `1f51dd295`): regole in ZtoryTaskFlow, push sicuro, Sync a
+tre vie col pulsante unico, PSD da riggare, WFA con anteprima. Dettagli e decisioni:
+ANIMATIC_TASKS_ARCHIVE_2026-09.md. Restano:
+- **Automazioni sul lato Kitsu** (le inserisce Franco dall'interfaccia): asset rough→clean,
+  clean→color, color→Modeling, Modeling→Rigging; shot Storyboard→Layout; tutte su **Done**.
+- In prospettiva (Franco, 26/09): al «Connect to Kitsu» l'utente vede solo i task assegnati a lui.
+- «Rigging» come ruolo scelto per tipo di asset (oggi letterale, un punto solo: `characterSceneTask`).
+- Il push degli asset non aggiunge al progetto Kitsu i tipi di task mancanti (gli shot si').
+- Ramo legacy senza DB (`setShotTaskStatus`) fuori da TaskFlow; fusione dei nomi non applicata agli
+  status nel `.ztoryc` della scena (due fonti per gli status degli shot).
+- `trCheckTask`/`uploadReviewPreview` oltre le ~50 righe.
+- Il push automatico serve ancora, ora che c'e' il Sync? (domanda del revisore, 27/09: da decidere).
+- Da collaudare a mano: il popup WFA su Quit e cambio progetto (tutto passa da saveSceneIfNeeded).
+- Note di rilascio: una versione vecchia che risalva production.ztrack perde `rigPsd` e le basi
+  (`synced`); il primo ⌘Z dopo la creazione della scena personaggio toglie le colonne del PSD.
 
 ## 🔧 Infrastruttura, rilasci, crash dormienti
 
