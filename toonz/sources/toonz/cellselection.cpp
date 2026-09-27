@@ -4753,13 +4753,37 @@ static void fillEmptyCellsUpwardIn(int r0, int c0, int r1, int c1) {
   TApp::instance()->getCurrentXsheet()->notifyXsheetChanged();
 }
 
+// Ztoryc: true when the modifiers held now are exactly those of one of this
+// command's own shortcuts, and that shortcut uses ⌘. Then ⌘ is down because
+// the user pressed the shortcut — which asks for the downward fill — not
+// because they want the upward one. A ⌘-click by a user whose downward
+// shortcut is ⌘ + a key reads as downward too; they have MI_FillEmptyCellUp.
+static bool cmdHeldForOwnShortcut(Qt::KeyboardModifiers held) {
+  QAction *action = CommandManager::instance()->getAction(MI_FillEmptyCell);
+  if (!action) return false;
+  const Qt::KeyboardModifiers relevant = Qt::ShiftModifier |
+                                         Qt::ControlModifier |
+                                         Qt::AltModifier | Qt::MetaModifier;
+  for (const QKeySequence &seq : action->shortcuts()) {
+    if (seq.isEmpty()) continue;
+    Qt::KeyboardModifiers seqMods(seq[0] & Qt::KeyboardModifierMask);
+    if ((seqMods & Qt::ControlModifier) &&
+        (seqMods & relevant) == (held & relevant))
+      return true;
+  }
+  return false;
+}
+
 // Ztoryc: ⌘ held while triggering (⌘-click on the button, or the menu) fills
 // UPWARD. The upward variant also has its own command, MI_FillEmptyCellUp, for
 // a keyboard shortcut: ⌘ + a key is a different key sequence in Qt and would
 // not trigger this command at all (Franco, 2026-09-25).
 void TCellSelection::fillEmptyCell() {
-  fillEmptyCells(QGuiApplication::queryKeyboardModifiers() &
-                 Qt::ControlModifier);  // ControlModifier = ⌘ on macOS
+  const Qt::KeyboardModifiers held = QGuiApplication::queryKeyboardModifiers();
+  // ControlModifier = ⌘ on macOS
+  const bool upward =
+      (held & Qt::ControlModifier) && !cmdHeldForOwnShortcut(held);
+  fillEmptyCells(upward);
 }
 
 void TCellSelection::fillEmptyCellUp() { fillEmptyCells(true); }
