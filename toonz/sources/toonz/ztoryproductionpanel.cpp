@@ -2158,6 +2158,10 @@ void ZtoryProductionPanel::rebuildBreakdown() {
                      : path);
           fileItem->setForeground(
               QBrush(QColor(isNear ? "#3273DC" : "#22D160")));
+        } else if (how == ZtoryModel::AssetMatch::NoFile) {
+          fileItem->setText(QObject::tr("— no file (on purpose)"));
+          fileItem->setToolTip(why);
+          fileItem->setForeground(QBrush(QColor("#9E9E9E")));
         } else {
           fileItem->setText(why);
           fileItem->setToolTip(
@@ -2235,7 +2239,12 @@ void ZtoryProductionPanel::showAssetLink(QTableWidgetItem *item, const Asset &a,
   ZtoryModel::AssetMatch how = ZtoryModel::AssetMatch::None;
   const QString file = m->resolveAssetFile(a, &why, dirCache, &how);
   QString tip;
-  if (file.isEmpty()) {
+  if (how == ZtoryModel::AssetMatch::NoFile) {
+    // Grey: no file on purpose — nothing is missing.
+    item->setIcon(linkDot(QColor("#9E9E9E")));
+    tip = tr("No file on purpose: it is drawn inside another asset.\n"
+             "Right-click to change it.");
+  } else if (file.isEmpty()) {
     item->setIcon(linkDot(QColor("#FF3860")));
     tip = tr("No file — the export skips it: %1").arg(why);
   } else if (how == ZtoryModel::AssetMatch::NearName ||
@@ -2373,6 +2382,16 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
     QAction *linkAct  = rowMenu.addAction(isChar
                                               ? QObject::tr("Link character scene…")
                                               : QObject::tr("Link file…"));
+    // No file on purpose: drawn inside another asset (the books in the
+    // library background). Stops any search or deduction of a wrong file.
+    // Not for a character: it always has its own scene.
+    QAction *noFileAct = nullptr;
+    if (!isChar) {
+      noFileAct = rowMenu.addAction(
+          QObject::tr("No file — drawn inside another asset"));
+      noFileAct->setCheckable(true);
+      noFileAct->setChecked(a.noFile);
+    }
     QAction *clearAct = a.filePath.isEmpty()
                             ? nullptr
                             : rowMenu.addAction(QObject::tr("Clear link"));
@@ -2445,6 +2464,13 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
     QAction *ch = rowMenu.exec(m_assetTable->viewport()->mapToGlobal(pos));
     if (!ch) return;
     if (ch == psdAct) { editAssetPsdOptions(row); return; }
+    if (noFileAct && ch == noFileAct) {
+      m->setAssetNoFile(row, !a.noFile);
+      persistAssets();
+      rebuildAssets();
+      rebuildBreakdown();
+      return;
+    }
     if (ch == linkAsIsAct) {
       m->setAssetFilePath(row, nearFile);
       persistAssets();

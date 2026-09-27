@@ -57,7 +57,10 @@ QVector<ZtoryAssetCheck> ztoryCheckShotAssets(const QStringList &shotUuids) {
       if (const Asset *a = m->assetByUuid(be.assetUuid)) {
         c.name = a->name;
         c.type = a->type;
-        c.file = m->resolveAssetFile(*a, &c.reason);
+        // No file on purpose (drawn inside another asset): listed as fine —
+        // not missing, not reported, and «the breakdown is empty» is not said.
+        c.onPurpose = a->noFile;
+        if (!c.onPurpose) c.file = m->resolveAssetFile(*a, &c.reason);
       } else {
         // Voce che punta a un asset cancellato: non e' «manca il file», e'
         // «manca l'asset». Dirlo con le stesse parole confonderebbe le idee su
@@ -147,6 +150,11 @@ ZtoryImportedAssets ztoryImportShotAssets(const QString &shotUuid,
   for (const BreakdownEntry &be : ps->breakdown) {
     const Asset *a = m->assetByUuid(be.assetUuid);
     if (!a) continue;
+    if (a->noFile) {
+      res.log << QObject::tr("%1: no file on purpose (drawn inside another "
+                             "asset)").arg(a->name);
+      continue;
+    }
     QString why;
     ZtoryModel::AssetMatch how = ZtoryModel::AssetMatch::None;
     const QString file = m->resolveAssetFile(*a, &why, nullptr, &how);

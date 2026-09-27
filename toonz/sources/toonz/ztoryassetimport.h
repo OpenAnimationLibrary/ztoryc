@@ -41,7 +41,8 @@ struct ZtoryAssetCheck {
   QString     file;    // risolto; vuoto se non si risolve
   QString     reason;  // perche' non si risolve; vuoto se si risolve
   QStringList shots;   // le etichette degli shot che lo chiedono
-  bool ok() const { return !file.isEmpty(); }
+  bool onPurpose = false;  // nessun file di proposito (disegnato in un altro)
+  bool ok() const { return onPurpose || !file.isEmpty(); }
 };
 
 // Controlla il breakdown degli shot indicati (uuid dello shot di progetto).

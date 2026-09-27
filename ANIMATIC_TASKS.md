@@ -1569,6 +1569,12 @@ file names» (default `{CODE}{EPNUM}_{TYPE}_{NAME}_V{VER}`; {TYPE} PS/BG/CH/FX, 
 secondo convenzione → verde; versione piu' alta, psd prima di png; backup `~` e .af ignorati) e a
 RINOMINARE (clic destro, secondo la convenzione della produzione). I file con piu' props (PS03-06)
 restano al collegamento a mano. Provato su un banco con i file veri della cartella props di CS2606.
+**Nessun file, di proposito (27/09 notte, Franco):** clic destro sull'asset → «No file — drawn inside
+another asset» (i libri gia' dipinti nello sfondo della libreria). Pallino grigio; niente ricerca ne'
+deduzione; all'export non e' fra i mancanti. Non per i personaggi. Un collegamento a mano resta e
+ricompare togliendo il segno; collegare un file toglie il segno.
+Voce di lavoro dalla review: il blocco <assets> dei .ztoryc vecchi (storyboardpanel ~3663) ricostruisce
+gli asset senza filePath/rigPsd/noFile — verificare che production.ztrack li rimetta dopo.
 
 ### Automazione degli status e Sync con Kitsu — cio' che resta (il fatto e' nell'archivio)
 

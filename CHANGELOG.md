@@ -27,6 +27,8 @@ cima all'ordine di lavoro (Puppetoonz al prossimo episodio). Prima applicazione 
   names»): Ztoryc riconosce CS2606_PS_bacchetta_V1.psd come BACCHETTA MAGICA e rinomina secondo la
   convenzione. Dalla review: il numero di episodio dedotto non si congela piu' salvando il campo; la
   rinomina in due passi torna indietro se fallisce.
+- **«Nessun file, di proposito»** per un asset disegnato dentro un altro (i libri nello sfondo della
+  libreria): pallino grigio, nessuna deduzione, non segnalato all'export.
 
 ### Fixed
 - Un **push manuale** riportava a WFA dei Done appena messi dal supervisore su Kitsu (incidente vero;

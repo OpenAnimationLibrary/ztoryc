@@ -764,6 +764,11 @@ QString ZtoryModel::resolveAssetFile(const Asset &a, QString *why,
     if (match) *match = how;
     return file;
   };
+  // 0. No file on purpose: nothing to look for, nothing to deduce.
+  if (a.noFile) {
+    if (match) *match = AssetMatch::NoFile;
+    return fail(tr("no file on purpose: drawn inside another asset"));
+  }
   // 1. Il legame esplicito VINCE sempre. E' l'unica risposta che non e' una
   //    supposizione, quindi non si discute e non si cerca oltre.
   if (!a.filePath.isEmpty()) {
@@ -1394,6 +1399,7 @@ void ZtoryModel::saveProjectDb() {
     if (!as.tags.isEmpty()) xml.writeAttribute("tags", as.tags.join("|"));
     if (!as.filePath.isEmpty()) xml.writeAttribute("file", as.filePath);
     if (!as.rigPsdPath.isEmpty()) xml.writeAttribute("rigPsd", as.rigPsdPath);
+    if (as.noFile) xml.writeAttribute("noFile", "1");
     if (!as.importPolicy.isDefault()) writeImportPolicy(xml, as.importPolicy);
     for (auto it = as.tasks.constBegin(); it != as.tasks.constEnd(); ++it) {
       xml.writeStartElement("atask");
@@ -1556,6 +1562,7 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
       as.kitsuAssetId = a.value("kitsuAssetId").toString();
       as.filePath     = a.value("file").toString();
       as.rigPsdPath   = a.value("rigPsd").toString();
+      as.noFile       = a.value("noFile") == QLatin1String("1");
       as.importPolicy = readImportPolicy(a);
       QString tg = a.value("tags").toString();
       if (!tg.isEmpty()) as.tags = tg.split('|', Qt::SkipEmptyParts);

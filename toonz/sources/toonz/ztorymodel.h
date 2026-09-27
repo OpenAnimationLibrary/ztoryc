@@ -247,6 +247,10 @@ struct Asset {
   // quando ci sta dentro: un percorso assoluto non vale sul Dell ne' su
   // Windows. Si legge con ZtoryModel::resolveAssetRigPsd.
   QString rigPsdPath;
+  // No file ON PURPOSE (Franco, 2026-09-27): the asset is drawn inside another
+  // one — the books already painted in the library background. Nothing is
+  // looked for or deduced, and the export does not report it as missing.
+  bool noFile = false;
 };
 
 // A project-level shot record. Owns the production progress (task status/
@@ -527,6 +531,7 @@ public:
     Exact,       // category folder + the asset's exact name
     NearName,    // the name written another way, or one typo apart
     Convention,  // the studio's naming convention, CODE_TYPE_name_Vn
+    NoFile,      // Asset::noFile: no file on purpose
   };
   QString resolveAssetFile(const Asset &a, QString *why = nullptr,
                            QHash<QString, QFileInfoList> *dirCache = nullptr,
@@ -588,11 +593,21 @@ public:
   // Il file legato a un asset (per un Character cutout: la scena da importare
   // come sotto-scena). Vuoto = nessun legame diretto.
   void setAssetFilePath(int i, const QString &path) {
-    if (i >= 0 && i < (int)m_assets.size()) m_assets[i].filePath = path;
+    if (i < 0 || i >= (int)m_assets.size()) return;
+    m_assets[i].filePath = path;
+    // A file given to it: it has one — whoever links it (tracker, scene
+    // creation, anything later) clears «no file on purpose» here, once.
+    if (!path.isEmpty()) m_assets[i].noFile = false;
   }
   // Il PSD da riggare di un personaggio: `absPath` si salva relativo alla
   // cartella del progetto se ci sta dentro. Vuoto = toglie il legame.
   void setAssetRigPsd(int i, const QString &absPath);
+  // No file on purpose (see Asset::noFile). A link made by hand is KEPT
+  // (resolveAssetFile answers NoFile before looking at it): turning the mark
+  // off brings it back, and there is no undo here to lose it to.
+  void setAssetNoFile(int i, bool on) {
+    if (i >= 0 && i < (int)m_assets.size()) m_assets[i].noFile = on;
+  }
   // Il percorso assoluto del PSD da riggare, o vuoto.
   QString resolveAssetRigPsd(const Asset &a) const;
   QString productionType()  const { return m_productionType; }
