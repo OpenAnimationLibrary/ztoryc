@@ -6,22 +6,63 @@
 #include "tcurves.h"
 // #include "tconvert.h"
 
+TProperty::TProperty(const TProperty &src)
+    : m_name(src.m_name)
+    , m_uiNameOrig(src.m_uiNameOrig)
+    , m_qstringName(src.m_qstringName)
+    , m_id(src.m_id)
+    , m_visible(src.m_visible) {
+  for (Listener *l : src.m_listeners) addListener(l);
+}
+
+TProperty &TProperty::operator=(const TProperty &src) {
+  if (this == &src) return *this;
+  m_name        = src.m_name;
+  m_uiNameOrig  = src.m_uiNameOrig;
+  m_qstringName = src.m_qstringName;
+  m_id          = src.m_id;
+  m_visible     = src.m_visible;
+  // Same listeners as the source, as the default assignment gave — with the
+  // bookkeeping on both sides.
+  const std::vector<Listener *> old = m_listeners;
+  for (Listener *l : old) removeListener(l);
+  for (Listener *l : src.m_listeners) addListener(l);
+  return *this;
+}
+
+TProperty::~TProperty() {
+  // Listeners outliving the property must not try to unregister from it.
+  for (Listener *l : m_listeners) {
+    std::vector<TProperty *> &props = l->m_listenedProperties;
+    props.erase(std::remove(props.begin(), props.end(), this), props.end());
+  }
+}
+
 void TProperty::addListener(Listener *listener) {
   if (std::find(m_listeners.begin(), m_listeners.end(), listener) ==
-      m_listeners.end())
+      m_listeners.end()) {
     m_listeners.push_back(listener);
+    listener->m_listenedProperties.push_back(this);
+  }
 }
 
 void TProperty::removeListener(Listener *listener) {
   m_listeners.erase(
       std::remove(m_listeners.begin(), m_listeners.end(), listener),
       m_listeners.end());
+  std::vector<TProperty *> &props = listener->m_listenedProperties;
+  props.erase(std::remove(props.begin(), props.end(), this), props.end());
 }
 
 void TProperty::notifyListeners() const {
-  std::vector<Listener *>::const_iterator it;
-  for (it = m_listeners.begin(); it != m_listeners.end(); ++it)
-    (*it)->onPropertyChanged();
+  // Over a copy: a listener's reaction may destroy another listener (it now
+  // unregisters, changing m_listeners under the loop). One that went away
+  // meanwhile is skipped.
+  const std::vector<Listener *> listeners = m_listeners;
+  for (Listener *l : listeners)
+    if (std::find(m_listeners.begin(), m_listeners.end(), l) !=
+        m_listeners.end())
+      l->onPropertyChanged();
 }
 
 void TProperty::assignUIName(TProperty *refP) {

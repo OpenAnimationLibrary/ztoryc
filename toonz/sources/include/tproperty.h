@@ -73,7 +73,22 @@ public:
   class Listener {
   public:
     virtual void onPropertyChanged() = 0;
-    virtual ~Listener() {}
+    // A listener that dies unregisters itself from every property it listens
+    // to. Tool option controls register in their constructors and never
+    // unregistered: when a room's tool options bar was rebuilt, the dead
+    // controls stayed in the (app-lifetime) tools' properties, and the next
+    // notify called freed memory — the crash clicking the mesh column of a
+    // character scene (Ztoryc, 2026-09-27; caught under lldb: 8 listeners on
+    // PlasticTool's «vertexName», the first one reallocated memory).
+    // Inline: a nested class is not exported from the DLL on Windows.
+    virtual ~Listener() {
+      const std::vector<TProperty *> props = m_listenedProperties;
+      for (TProperty *p : props) p->removeListener(this);
+    }
+
+  private:
+    friend class TProperty;
+    std::vector<TProperty *> m_listenedProperties;
   };
 
   // eccezioni
@@ -87,7 +102,11 @@ public:
     m_qstringName(QString::fromStdString(name))
     { }
 
-  virtual ~TProperty() {}
+  // A copy notifies the same listeners as the original, as it always did —
+  // but now they know it, so they can unregister from it too.
+  TProperty(const TProperty &src);
+  TProperty &operator=(const TProperty &src);
+  virtual ~TProperty();
 
   virtual TProperty *clone() const = 0;
 

@@ -439,6 +439,7 @@ void TPSDReader::load(TRasterImageP &img, int layerId) {
     openFile();
     doImage(rasP, layerId);
     fclose(m_file);
+    m_file = nullptr;  // closed: the catch below must not close it again
     /*
     // do savebox
     long sbx0 = li ? li->left : 0;
@@ -492,6 +493,12 @@ void TPSDReader::load(TRasterImageP &img, int layerId) {
     img->setDpi(m_headerInfo.hres, m_headerInfo.vres);
     img->setSavebox(savebox);
   } catch (...) {
+    // A layer that fails while being read left its file open: on Windows the
+    // PSD stayed locked, even for Photoshop (Ztoryc, 2026-09-27).
+    if (m_file) {
+      fclose(m_file);
+      m_file = nullptr;
+    }
   }
 }
 
