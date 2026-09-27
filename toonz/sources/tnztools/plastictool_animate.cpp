@@ -36,14 +36,31 @@ using namespace PlasticToolLocals;
 namespace {
 
 // ZtoRig: undo for the STAGE-object transform key that Global-All posing now
-// also writes (the plastic key has its own AnimateValuesUndo). Restores the
-// frame to exactly what it was — a key with its old values, or no key at all.
+// also writes (the plastic key has its own AnimateValuesUndo). Snapshots the
+// TRANSFORM channels only, one by one. It used to go through
+// TStageObject::getKeyframe / setKeyframeWithoutUndo / removeKeyframeWithoutUndo,
+// and those carry the PLASTIC keys too: the snapshot, taken after the drag, held
+// the new pose, and the "no key before" test saw the drag's own plastic keys —
+// so undo left the transform keys and put the new pose back (Franco,
+// 2026-09-27). Usage: construct BEFORE keying, then apply().
 class StageTransformKeyUndo final : public TUndo {
+  // The channels TStageObject::setKeyframeWithoutUndo(frame) keys.
+  static constexpr TStageObject::Channel kChannels[] = {
+      TStageObject::T_Angle,  TStageObject::T_X,      TStageObject::T_Y,
+      TStageObject::T_Z,      TStageObject::T_SO,     TStageObject::T_ScaleX,
+      TStageObject::T_ScaleY, TStageObject::T_Scale,  TStageObject::T_Path,
+      TStageObject::T_ShearX, TStageObject::T_ShearY};
+  static constexpr int kCount = sizeof(kChannels) / sizeof(kChannels[0]);
+
+  struct ChannelState {
+    bool isKey = false;
+    TDoubleKeyframe key;
+  };
+
   TXsheetHandle *m_xsh;
   TStageObjectId m_id;
   int m_frame;
-  bool m_hadKey;
-  TStageObject::Keyframe m_oldKey;
+  ChannelState m_old[kCount], m_new[kCount];
 
   TStageObject *obj() const {
     return (m_xsh && m_xsh->getXsheet())
@@ -51,34 +68,50 @@ class StageTransformKeyUndo final : public TUndo {
                : 0;
   }
 
-public:
-  StageTransformKeyUndo(TXsheetHandle *xsh, const TStageObjectId &id, int frame,
-                        bool hadKey, const TStageObject::Keyframe &oldKey)
-      : m_xsh(xsh)
-      , m_id(id)
-      , m_frame(frame)
-      , m_hadKey(hadKey)
-      , m_oldKey(oldKey) {}
-
-  int getSize() const override { return sizeof(*this); }
-
-  void undo() const override {
+  void capture(ChannelState *out) const {
     TStageObject *o = obj();
     if (!o) return;
-    if (m_hadKey)
-      o->setKeyframeWithoutUndo(m_frame, m_oldKey);
-    else
-      o->removeKeyframeWithoutUndo(m_frame);
+    for (int i = 0; i < kCount; ++i) {
+      TDoubleParam *p = o->getParam(kChannels[i]);
+      out[i].isKey    = p && p->isKeyframe(m_frame);
+      if (out[i].isKey) out[i].key = p->getKeyframeAt(m_frame);
+    }
+  }
+
+  void restore(const ChannelState *in) const {
+    TStageObject *o = obj();
+    if (!o) return;
+    for (int i = 0; i < kCount; ++i) {
+      TDoubleParam *p = o->getParam(kChannels[i]);
+      if (!p) continue;
+      if (in[i].isKey)
+        p->setKeyframe(in[i].key);
+      else if (p->isKeyframe(m_frame))
+        p->deleteKeyframe(m_frame);
+    }
     o->updateKeyframes();
     if (m_xsh) m_xsh->notifyXsheetChanged();
   }
-  void redo() const override {
+
+public:
+  StageTransformKeyUndo(TXsheetHandle *xsh, const TStageObjectId &id, int frame)
+      : m_xsh(xsh), m_id(id), m_frame(frame) {
+    capture(m_old);
+  }
+
+  // Keys the transform at the frame and records the result for redo.
+  void apply() {
     TStageObject *o = obj();
     if (!o) return;
     o->setKeyframeWithoutUndo(m_frame);
     o->updateKeyframes();
-    if (m_xsh) m_xsh->notifyXsheetChanged();
+    capture(m_new);
   }
+
+  int getSize() const override { return sizeof(*this); }
+
+  void undo() const override { restore(m_old); }
+  void redo() const override { restore(m_new); }
 };
 
 class AnimateValuesUndo final : public TUndo {
@@ -522,8 +555,14 @@ void PlasticTool::leftButtonDrag_animate(const TPointD &pos,
   // locked while a foot is pinned on a child leg.
   bool isRoot = m_svSel.hasSingleObject() &&
                 deformedSkeleton().vertex(m_svSel).parent() < 0;
-  bool ikPin  = m_ikDrag.getValue() && (pinnedVertexAtFrame(frame) >= 0 ||
-                                       hasCrossLevelPin_animate(frame));
+  // Ztoryc: Keep Distance OFF wins over the IK. The solver rotates bones and
+  // never changes their length, so with IK on the box had no effect and an arm
+  // could not be stretched (Franco, 2026-09-27). Off = this drag goes the FK
+  // way, which moves angle AND distance. Keep Distance is on by default: the
+  // usual IK work never comes here.
+  const bool useIK = m_ikDrag.getValue() && m_keepDistance.getValue();
+  bool ikPin  = useIK && (pinnedVertexAtFrame(frame) >= 0 ||
+                          hasCrossLevelPin_animate(frame));
 
   // Dragging a PINNED vertex must do nothing — the pin is precisely the
   // statement that this vertex stays put. The cross-level solver declines the
@@ -552,7 +591,7 @@ void PlasticTool::leftButtonDrag_animate(const TPointD &pos,
     // vertex, so the solve must span the connected columns. Only for a
     // non-root vertex (the current column's root has no ANGLE param of its
     // own — its motion belongs to the parent column).
-    if (m_ikDrag.getValue() &&
+    if (useIK &&
         (deformedSkeleton().vertex(m_svSel).parent() >= 0 || ikPin)) {
       // Cross-column pin (a foot on a child leg) → unified IK on the combined
       // graph (STEP A): re-root at the pin so the foot holds while the body
@@ -2987,21 +3026,41 @@ void PlasticTool::leftButtonUp_animate(const TPointD &pos,
     // solid gold, reading as "transform keyed too"). Keyed BEFORE the undo
     // snapshot in finishCrossLevelUndo_animate, so undo removes these keys as
     // well. Per-column param time, same rule as the undo loop.
-    if (m_globalKey.getValue()) {
+    // Ztoryc: the Global Key SCOPE, as on the single-vertex path below — 0
+    // Stage, 1 Plastic, 2 All. This path keyed the plastic side whatever the
+    // scope and the transform never: with «All» a cross-column IK pose left
+    // every column's stage unkeyed (Franco, 2026-09-27; the gap noted when the
+    // single-vertex path was fixed, 201b76d46). One undo block for all of it:
+    // the transform keys, the plastic keys and the drag's own undo.
+    const int scope          = m_globalKeyScope.getIndex();
+    const bool globalKey     = m_globalKey.getValue();
+    const bool doTransform   = globalKey && scope != 1;  // Stage or All
+    const bool doFullPlastic = globalKey && scope != 0;  // Plastic or All
+    TUndoManager::manager()->beginBlock();
+    if (globalKey) {
       TXsheet *xsh = TTool::getApplication()->getCurrentXsheet()->getXsheet();
       for (auto &kv : m_ikCrossDefs) {
         const int col   = kv.first;
         const SkDP &def = kv.second;
         if (!def) continue;
-        double pf = ::frame();
-        if (col != ::column() && xsh)
-          if (TStageObject *obj =
-                  xsh->getStageObject(TStageObjectId::ColumnId(col)))
-            pf = obj->paramsTime(pf);
-        ::setKeyframe(def, pf, def->skeletonId(pf));
+        TStageObject *obj =
+            xsh ? xsh->getStageObject(TStageObjectId::ColumnId(col)) : nullptr;
+        if (doTransform && obj) {
+          auto *u = new StageTransformKeyUndo(
+              TTool::getApplication()->getCurrentXsheet(), obj->getId(),
+              (int)::frame());
+          u->apply();
+          TUndoManager::manager()->add(u);
+        }
+        if (doFullPlastic) {
+          double pf = ::frame();
+          if (col != ::column() && obj) pf = obj->paramsTime(pf);
+          ::setKeyframe(def, pf, def->skeletonId(pf));
+        }
       }
     }
     finishCrossLevelUndo_animate(::frame());
+    TUndoManager::manager()->endBlock();
     m_dragged = false;
     updateMatrix();
     TTool::getApplication()->getCurrentXsheet()->notifyXsheetChanged();
@@ -3028,14 +3087,11 @@ void PlasticTool::leftButtonUp_animate(const TPointD &pos,
     if (doTransform) {
       TStageObject *o = stageObject();
       if (o) {
-        const int f = (int)::frame();
-        const bool had = o->isKeyframe(f);
-        TStageObject::Keyframe oldKey;
-        if (had) oldKey = o->getKeyframe(f);
-        o->setKeyframeWithoutUndo(f);
-        TUndoManager::manager()->add(new StageTransformKeyUndo(
-            TTool::getApplication()->getCurrentXsheet(), o->getId(), f, had,
-            oldKey));
+        auto *u = new StageTransformKeyUndo(
+            TTool::getApplication()->getCurrentXsheet(), o->getId(),
+            (int)::frame());
+        u->apply();
+        TUndoManager::manager()->add(u);
       }
     }
 

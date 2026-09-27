@@ -57,6 +57,13 @@ class DVAPI TStageObjectValues {
   int m_frame;
   std::vector<Channel> m_channels;
 
+  // Ztoryc: what setGlobalKeyframe() did to the plastic POSE keys, so that
+  // UndoStageObjectMove can take them back. applyValues() restores only the
+  // channels above: a global key with scope Plastic/All on a rigged column
+  // survived the undo of an Animate tool drag (Franco, 2026-09-27).
+  bool m_plasticKeyed = false;
+  SkDKey m_plasticBefore;
+
 public:
   TStageObjectValues();
   TStageObjectValues(TStageObjectId id, TStageObject::Channel a0);
@@ -87,6 +94,11 @@ public:
   double getValue(int index) const;
 
   void setGlobalKeyframe();
+
+  //! Ztoryc: undo/redo of the plastic half of setGlobalKeyframe(). No-op when
+  //! it keyed no plastic.
+  void undoPlasticGlobalKeyframe() const;
+  void redoPlasticGlobalKeyframe() const;
 
   /*--
    * HistoryPanel表示のために、動かしたObject/Channel名・フレーム番号の文字列を返す

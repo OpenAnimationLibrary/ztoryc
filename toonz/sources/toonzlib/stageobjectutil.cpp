@@ -168,9 +168,39 @@ void TStageObjectValues::setGlobalKeyframe() {
   if (doStage) stageObject->setKeyframeWithoutUndo(m_frame);
   // Runs even when setKeyframeWithoutUndo returned early on isFullKeyframe():
   // the stage channels being already keyed says nothing about the plastic ones.
-  if (doPlastic) stageObject->setPlasticPoseKeyframe(m_frame);
+  if (doPlastic) {
+    // Snapshot first, as UndoSetKeyFrame does: the undo puts back exactly
+    // the plastic keys that were at this frame.
+    if (const PlasticSkeletonDeformationP &sd =
+            stageObject->getPlasticSkeletonDeformation()) {
+      sd->getKeyframeAt(stageObject->paramsTime(m_frame), m_plasticBefore);
+      m_plasticKeyed = true;
+    }
+    stageObject->setPlasticPoseKeyframe(m_frame);
+  }
 
   m_xsheetHandle->notifyXsheetChanged();
+}
+
+//-----------------------------------------------------------------------------
+
+void TStageObjectValues::undoPlasticGlobalKeyframe() const {
+  if (!m_plasticKeyed) return;
+  TStageObject *obj = m_xsheetHandle->getXsheet()->getStageObject(m_objectId);
+  if (!obj) return;
+  obj->removePlasticPoseKeyframe(m_frame);
+  if (const PlasticSkeletonDeformationP &sd =
+          obj->getPlasticSkeletonDeformation())
+    sd->setKeyframe(m_plasticBefore);
+}
+
+//-----------------------------------------------------------------------------
+
+void TStageObjectValues::redoPlasticGlobalKeyframe() const {
+  if (!m_plasticKeyed) return;
+  if (TStageObject *obj =
+          m_xsheetHandle->getXsheet()->getStageObject(m_objectId))
+    obj->setPlasticPoseKeyframe(m_frame);
 }
 
 //-----------------------------------------------------------------------------
@@ -421,6 +451,9 @@ UndoStageObjectMove::UndoStageObjectMove(const TStageObjectValues &before,
 //-----------------------------------------------------------------------------
 
 void UndoStageObjectMove::undo() const {
+  // Plastic first: it finds its frame through paramsTime(), which depends on
+  // the stage keys that applyValues() may remove (Cycle past the last key).
+  m_after.undoPlasticGlobalKeyframe();
   m_before.applyValues(false);
   m_objectHandle->notifyObjectIdChanged(false);
 
@@ -436,6 +469,7 @@ void UndoStageObjectMove::undo() const {
 
 void UndoStageObjectMove::redo() const {
   m_after.applyValues(false);
+  m_after.redoPlasticGlobalKeyframe();
   m_xsheetHandle->notifyXsheetChanged();
   m_objectHandle->notifyObjectIdChanged(false);
 }
