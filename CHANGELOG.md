@@ -26,6 +26,11 @@ cima all'ordine di lavoro (Puppetoonz al prossimo episodio). Prima applicazione 
 - All'apertura di uno shot una seconda regola rimetteva lo **Storyboard in WIP**.
 - La creazione dei task degli asset toccava **gli asset di tutti gli episodi** del progetto Kitsu.
 - **Fill verso l'alto** partiva dalla scorciatoia del comando verso il basso (`a731855a7`).
+- **Rigging/Modeling tornavano nella catena di Prop ed Environment a ogni Sync**: la vecchia
+  creazione dei task aveva messo task orfani su tutti gli asset di Kitsu, che Kitsu nasconde (tipo di
+  task non legato al tipo di asset) ma il pull leggeva e «adottava». Ora Ztoryc rispetta il legame
+  tipo di asset ↔ tipo di task di Kitsu in lettura e scrittura, e avvisa di cio' che non manda
+  (commit dopo la chiusura). Verificato sul database di Kitsu.
 
 ### Modified
 - «Character»/«Storyboard» in un posto solo; palette e elenco status condivisi; un parser dei tipi di

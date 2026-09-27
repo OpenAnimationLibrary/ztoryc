@@ -290,6 +290,14 @@ ZtoryKitsuSync::ZtoryKitsuSync(QObject *parent) : QObject(parent) {
                      .arg(lines.join("\n")));
           });
 
+  connect(kc, &KitsuClient::assetTasksUnlinked, this, [this](int count) {
+    warn(tr("%1 asset task status(es) changed in Ztoryc were NOT sent: on Kitsu "
+            "their task type is not linked to the asset's type (Kitsu hides "
+            "those tasks). Remove the task type from that asset type's pipeline "
+            "in Ztoryc, or link it to the asset type on Kitsu.")
+             .arg(count));
+  });
+
   // Step 1: shots, then their task statuses.
   connect(kc, &KitsuClient::shotsPushed, this,
           [this](bool ok, int, int, const QString &msg) {

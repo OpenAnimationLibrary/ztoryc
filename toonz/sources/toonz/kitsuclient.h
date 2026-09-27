@@ -446,6 +446,9 @@ signals:
   // One queued status change was handled. result: TransitionResult;
   // serverStatus: the TaskStatus Kitsu had (meaningful for TrConflict).
   void reviewPreviewUploaded(int token, bool ok, const QString &message);
+  // Asset task statuses changed in Ztoryc but not sent: their task type is
+  // not linked to the asset type on Kitsu (which hides such tasks).
+  void assetTasksUnlinked(int count);
   void transitionPushed(int entity, const QString &uuid,
                         const QString &taskType, int result, int serverStatus,
                         const QString &message);
@@ -610,6 +613,14 @@ private:
   QHash<QString, QString> m_apAssetTypeName;  // asset-type id -> name
   QHash<QString, QString> m_apAssetName;      // asset id      -> name
   QHash<QString, QString> m_apAssetType;      // asset id      -> asset-type name
+  // Ztoryc: the task types Kitsu LINKS to each asset type (asset-type name,
+  // lower case -> task-type ids), from «task_types» of /api/data/asset-types.
+  // Kitsu's own interface hides a task whose type is not linked to its
+  // asset's type; Ztoryc must ignore it too (2026-09-27).
+  QHash<QString, QSet<QString>> m_assetTypeTaskTypes;
+  void readAssetTypeLinks(const QJsonObject &assetType);
+  bool taskTypeLinked(const QString &assetTypeName,
+                      const QString &taskTypeId) const;
   QHash<QString, QString> m_apTtName;         // task-type id  -> Kitsu name (Asset)
 
   // --- Team / assignees (persons) — shared by pulls and the assign pass ---

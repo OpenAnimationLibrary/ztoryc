@@ -1559,6 +1559,10 @@ ANIMATIC_TASKS_ARCHIVE_2026-09.md. Restano:
   clean→color, color→Modeling, Modeling→Rigging; shot Storyboard→Layout; tutte su **Done**.
 - In prospettiva (Franco, 26/09): al «Connect to Kitsu» l'utente vede solo i task assegnati a lui.
 - «Rigging» come ruolo scelto per tipo di asset (oggi letterale, un punto solo: `characterSceneTask`).
+- **Da fare a mano (Franco)**: togliere di nuovo Rigging e Modeling dalla catena di Prop ed Environment
+  nella scheda Asset Types di CS2606 (dal 27/09 notte il Sync non li rimette). Su Kitsu restano ~46
+  task orfani nascosti (Rigging/Modeling su props ed environment, creati dalla vecchia
+  /assets/create-tasks): innocui, Ztoryc ora li ignora; cancellarli e' una scelta di Franco.
 - Il push degli asset non aggiunge al progetto Kitsu i tipi di task mancanti (gli shot si').
 - Ramo legacy senza DB (`setShotTaskStatus`) fuori da TaskFlow; fusione dei nomi non applicata agli
   status nel `.ztoryc` della scena (due fonti per gli status degli shot).

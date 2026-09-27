@@ -1488,10 +1488,12 @@ void KitsuClient::atLoadAssetTypes() {
     r->deleteLater();
     const QByteArray b = r->readAll();
     if (r->error() != QNetworkReply::NoError) { atFail(errorMessage(r, b)); return; }
+    m_assetTypeTaskTypes.clear();
     for (const QJsonValue &v : QJsonDocument::fromJson(b).array()) {
       const QJsonObject o = v.toObject();
       m_atAssetTypeIdByName.insert(o.value("name").toString().toLower(),
                                    o.value("id").toString());
+      readAssetTypeLinks(o);
     }
     atLoadAssets();
   });
@@ -1542,6 +1544,8 @@ void KitsuClient::atLoadTasks() {
       const QString typeId  = m_atAssetTypeIdByName.value(t.assetType.toLower());
       const QString assetId = m_atAssetIds.value(typeId + "/" + t.assetName.toLower());
       if (ttId.isEmpty() || assetId.isEmpty()) continue;
+      // Never create a task Kitsu would hide (type not linked to the asset's).
+      if (!taskTypeLinked(t.assetType, ttId)) continue;
       const QString key = assetId + "/" + ttId;
       if (m_atTaskIdByKey.contains(key) || queued.contains(key)) continue;
       queued.insert(key);
@@ -1562,7 +1566,8 @@ void KitsuClient::atApplyNext() {
     // Skip anything we couldn't resolve (unknown task-type, asset or status),
     // and what did not change in Ztoryc since the last sync.
     if (t.createOnly || ttId.isEmpty() || assetId.isEmpty() ||
-        taskId.isEmpty() || statusId.isEmpty()) {
+        taskId.isEmpty() || statusId.isEmpty() ||
+        !taskTypeLinked(t.assetType, ttId)) {
       ++m_atApplyIdx;
       continue;
     }
@@ -1617,6 +1622,7 @@ void KitsuClient::atApplyNext() {
     const QString assetId = m_atAssetIds.value(typeId + "/" + t.assetName.toLower());
     const QString taskId  = m_atTaskIdByKey.value(assetId + "/" + ttId);
     if (taskId.isEmpty()) continue;
+    if (!taskTypeLinked(t.assetType, ttId)) continue;  // hidden on Kitsu
     QSet<QString> &have = m_atAssigneesByKey[assetId + "/" + ttId];
     for (const QString &name : t.assignees) {
       const QString pid = m_personIdByName.value(name.trimmed().toLower());
@@ -1630,13 +1636,25 @@ void KitsuClient::atApplyNext() {
     }
   }
   const int assigned = m_assignQueue.size(), skipped = skippedNames.size();
-  m_assignOnDone = [this, statusesSet, unchanged, assigned, skipped]() {
+  // Changed in Ztoryc on a task type Kitsu does not link to that asset type:
+  // not sent, and said — silence would look like it had worked.
+  int unlinked = 0;
+  for (const KitsuAssetTaskPush &t : m_atQueue)
+    if (!t.createOnly &&
+        !taskTypeLinked(t.assetType,
+                        m_atTtIdByName.value(normalizeTaskType(t.taskType))))
+      ++unlinked;
+  if (unlinked > 0) emit assetTasksUnlinked(unlinked);
+  m_assignOnDone = [this, statusesSet, unchanged, assigned, skipped, unlinked]() {
     QString msg = unchanged > 0
                       ? tr("Done — %1 asset task statuses changed, %2 unchanged.")
                             .arg(statusesSet).arg(unchanged)
                       : tr("Done — %1 asset task statuses set in Kitsu.").arg(statusesSet);
     if (assigned > 0) msg += tr("  %1 people assigned.").arg(assigned);
     if (skipped > 0)  msg += tr("  %1 not in team (skipped).").arg(skipped);
+    if (unlinked > 0)
+      msg += tr("  %1 not sent: task type not linked to the asset type on Kitsu.")
+                 .arg(unlinked);
     emit assetTasksPushed(true, statusesSet, msg);
   };
   assignRun();
@@ -1791,9 +1809,11 @@ void KitsuClient::apLoadTypes() {
     r->deleteLater();
     const QByteArray b = r->readAll();
     if (r->error() != QNetworkReply::NoError) { apFail(errorMessage(r, b)); return; }
+    m_assetTypeTaskTypes.clear();
     for (const QJsonValue &v : QJsonDocument::fromJson(b).array()) {
       const QJsonObject o = v.toObject();
       m_apAssetTypeName.insert(o.value("id").toString(), o.value("name").toString());
+      readAssetTypeLinks(o);
     }
     apLoadAssets();
   });
@@ -1847,6 +1867,12 @@ void KitsuClient::apLoadTasks() {
       const QString assetId  = o.value("entity_id").toString();
       const QString ttName   = m_apTtName.value(o.value("task_type_id").toString());
       if (ttName.isEmpty() || !m_apAssetName.contains(assetId)) continue;
+      // A task Kitsu itself hides: its type is not linked to the asset's
+      // type. Adopting it put Rigging/Modeling back in the Prop pipeline at
+      // every Sync (CS2606, 2026-09-27: orphan tasks of the old create-tasks).
+      if (!taskTypeLinked(m_apAssetType.value(assetId),
+                          o.value("task_type_id").toString()))
+        continue;
       KitsuAssetStatusEntry e;
       e.assetType    = m_apAssetType.value(assetId);
       e.assetName    = m_apAssetName.value(assetId);
@@ -2476,6 +2502,23 @@ void KitsuClient::mirrorUploadedWfa(const QVector<KitsuPreviewUpload> &uploads) 
       dirty = true;
   }
   if (dirty) m->saveAndNotifyTasks();
+}
+
+void KitsuClient::readAssetTypeLinks(const QJsonObject &assetType) {
+  QSet<QString> ids;
+  for (const QJsonValue &v : assetType.value("task_types").toArray())
+    ids.insert(v.isObject() ? v.toObject().value("id").toString()
+                            : v.toString());
+  m_assetTypeTaskTypes.insert(assetType.value("name").toString().toLower(), ids);
+}
+
+// No links for the asset type (older servers, or none set) means Kitsu shows
+// every task type: then nothing is filtered.
+bool KitsuClient::taskTypeLinked(const QString &assetTypeName,
+                                 const QString &taskTypeId) const {
+  const auto it = m_assetTypeTaskTypes.constFind(assetTypeName.toLower());
+  if (it == m_assetTypeTaskTypes.constEnd() || it->isEmpty()) return true;
+  return it->contains(taskTypeId);
 }
 
 bool KitsuClient::isPipelineStatusId(const QString &statusId) const {
