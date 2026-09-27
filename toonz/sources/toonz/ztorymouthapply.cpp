@@ -1,4 +1,5 @@
 #include "ztorymouthapply.h"
+#include "ztorymouthlibrary.h"
 
 #include "tapp.h"
 #include "toonzqt/icongenerator.h"
@@ -46,6 +47,14 @@ QString MouthApplyReport::summary() const {
   if (offStage > 0)
     parts << QObject::tr("%1 frames where the character is not on stage")
                  .arg(offStage);
+  if (noPhoneme > 0)
+    parts << QObject::tr("%1 frames with no phoneme").arg(noPhoneme);
+  if (unknownShape > 0)
+    parts << QObject::tr("%1 phonemes not recognised").arg(unknownShape);
+  if (noSet > 0)
+    parts << QObject::tr("%1 frames whose set is not in the map").arg(noSet);
+  if (!destinations.isEmpty())
+    parts << QObject::tr("written into: %1").arg(destinations.join("; "));
   if (!conflicts.isEmpty()) {
     QStringList f;
     for (int i = 0; i < conflicts.size() && i < 6; i++)
@@ -206,6 +215,93 @@ bool locate(TXsheet *xsh, TXshLevel *target, int row, int depth,
 
 //! Rimette le celle com'erano. Si fotografa PRIMA di scrivere: applicare il lip
 //! sync sovrascrive la colonna delle bocche, che e' lavoro dell'animatore.
+// ⚠️ LE CELLE SONO STATE SCRITTE DENTRO UNA SOTTO-SCENA, ma chi guarda e'
+// l'xsheet di sopra: la sua immagine resta quella di prima, e
+// notifyXsheetChanged() non la rifa'. Sintomo esatto (Franco, 2026-08-17):
+// applicato il set giusto, nel main restavano visibili le bocche del set
+// sbagliato; entrando nella sotto-scena si vedevano quelle giuste, e
+// uscendo il main si aggiornava. Non era un caso: uscire da una sotto-scena
+// invalida l'icona del livello che la espone (subscenecommand.cpp,
+// closeSubXsheet). Qui si fa la stessa cosa senza dover entrare e uscire.
+//
+// ⚠️ NON si svuota TImageCache: cancellerebbe anche i disegni su cui si sta
+// lavorando, col cursore a pallino rosso per cache miss (vedi la nota in
+// ztorymodel.cpp, ZtoryModel::activateShotForViewing).
+//
+// Una funzione e non un pezzo di apply: la chiama anche l'annullamento, che
+// senza lasciava il viewer stantio dopo ⌘Z (revisione, 2026-09-27).
+void invalidateMouthDestinations(const QSet<TXsheet *> &destXshs) {
+  if (TXsheet *cur = TApp::instance()->getCurrentXsheet()->getXsheet()) {
+    if (!destXshs.contains(cur) || destXshs.size() > 1) {
+      // ⚠️ NON basta la sotto-scena che e' cambiata: vanno invalidate TUTTE
+      // quelle che la contengono, fino a quella che si vede da qui.
+      //
+      // Le bocche stanno annidate — shot ▸ personaggio ▸ (magari) testa ▸
+      // bocche — e ogni livello tiene la propria immagine composita: quella del
+      // personaggio non si rifa' solo perche' e' cambiata quella dentro. Prima
+      // invalidavo solo l'anello piu' interno, e l'aggiornamento arrivava solo
+      // aprendo a mano tutte le nidificazioni (Franco, 2026-08-17) — cioe'
+      // facendo a mano, uscendo, cio' che closeSubXsheet fa a ogni livello.
+      //
+      // Si scende dall'xsheet corrente e si invalida ogni anello della catena
+      // che porta a quello modificato. Solo quella catena: invalidare tutto
+      // vorrebbe dire rigenerare i personaggi che non c'entrano.
+      std::function<bool(TXsheet *, std::set<TXsheet *> &)> invalidateChain =
+          [&](TXsheet *xsh, std::set<TXsheet *> &seen) -> bool {
+        if (!xsh || !seen.insert(xsh).second) return false;
+        // A destination: its texture goes, and the descent CONTINUES — the
+        // mouths can sit in another destination deeper down (SOFIA's turn).
+          // ⚠️ QUESTA E' LA CACHE VERA, e non erano le icone.
+          //
+          // Il viewer NON tiene un'immagine composita: `stage.cpp` ricorre dal
+          // vivo dentro le sotto-scene a ogni ridisegno. Tiene pero' una
+          // TEXTURE OpenGL del CONTENUTO DI UN XSHEET a un dato fotogramma
+          // (`texture_utils::getTextureData(const TXsheet*, int)`), e cambiare
+          // le celle dentro quell'xsheet non la tocca. E' il motivo per cui
+          // uscire dalla sotto-scena aggiustava tutto: TXsheetHandle::setXsheet
+          // chiama invalidateTextures() con il commento «we'll be editing
+          // m_xsheet - so destroy every texture of his».
+        const bool isDest = destXshs.contains(xsh);
+        if (isDest) texture_utils::invalidateTextures(xsh);
+        bool onPath = isDest;
+        for (int c = 0; c < xsh->getColumnCount(); c++) {
+          int r0 = 0, r1 = -1;
+          xsh->getCellRange(c, r0, r1);
+          std::set<TXshLevel *> done;
+          for (int r = r0; r <= r1; r++) {
+            const TXshCell cell = xsh->getCell(r, c);
+            if (cell.isEmpty() || !cell.m_level) continue;
+            TXshChildLevel *cl = cell.m_level->getChildLevel();
+            if (!cl || !done.insert(cell.m_level.getPointer()).second) continue;
+            if (!invalidateChain(cl->getXsheet(), seen)) continue;
+            // Questa sotto-scena contiene cio' che e' cambiato: la sua icona
+            // non vale piu' su NESSUN fotogramma esposto, non solo sul primo.
+            for (int rr = r0; rr <= r1; rr++) {
+              const TXshCell cc = xsh->getCell(rr, c);
+              if (!cc.isEmpty() && cc.m_level.getPointer() ==
+                                       cell.m_level.getPointer())
+                IconGenerator::instance()->invalidate(cc.m_level.getPointer(),
+                                                      cc.m_frameId);
+            }
+            onPath = true;
+          }
+        }
+        // Anche gli ANELLI DI SOPRA: la texture di un xsheet e' il suo
+        // contenuto composito, quindi quella del personaggio contiene le bocche
+        // ed e' vecchia quanto la loro.
+        if (onPath && !isDest) texture_utils::invalidateTextures(xsh);
+        return onPath;
+      };
+      std::set<TXsheet *> seen;
+      invalidateChain(cur, seen);
+
+      // La notifica che rifa' il render composito — la stessa che l'animatic usa
+      // dopo le sue modifiche.
+      TApp::instance()->getCurrentScene()->notifySceneChanged();
+    }
+  }
+}
+
 class MouthApplyUndo final : public TUndo {
   TXsheet *m_xsh;
   int m_col;
@@ -223,6 +319,7 @@ public:
       m_xsh->setCell(it.key(), m_col, it.value());
     TApp::instance()->getCurrentXsheet()->notifyXsheetChanged();
     TApp::instance()->getCurrentScene()->setDirtyFlag(true);
+    invalidateMouthDestinations(QSet<TXsheet *>{m_xsh});
   }
   void undo() const override { put(m_before); }
   void redo() const override { put(m_after); }
@@ -286,6 +383,37 @@ QVector<MouthApplyTarget> ZtoryMouthApply::findTargets(ToonzScene *scene) {
   // Si ritrova per la catena che Franco aveva progettato dall'inizio —
   // personaggio -> asset -> scena di libreria -> mappa — e l'aggancio e' il
   // NOME della sotto-scena, che l'import non cambia.
+  // ── I set della LIBRERIA, sempre, accanto a quelli dello shot ───────────
+  // Prima lo shot ereditava dalla libreria SOLO se non aveva set suoi: appena
+  // ne creavi uno, quelli del personaggio sparivano, e un set pubblicato dopo
+  // l'import non arrivava (Franco, 2026-09-27). Ora si uniscono: a parita' di
+  // nome vince quello dello shot, che e' una variante voluta per la scena.
+  // La libreria si trova per la catena sicura — la sotto-scena piu' vicina
+  // SOPRA che si chiama come la scena di un personaggio — non per il solo
+  // nome della sotto-scena (ztorymouthlibrary.cpp).
+  for (MouthApplyTarget &t : out) {
+    if (characterScene || t.subScene.isEmpty()) continue;
+    MouthMap lib;
+    QString who;
+    if (!ZtoryMouthLibrary::libraryMapForSubScene(scene, t.subScene, &lib,
+                                                  &who))
+      continue;
+    int added = 0;
+    for (MouthSet s : lib.sets) {
+      if (t.map.indexOfSet(s.name) >= 0) continue;
+      s.fromLibrary = who;
+      t.map.sets.push_back(s);
+      added++;
+    }
+    if (added > 0 && t.fromCharacter.isEmpty()) {
+      t.fromCharacter = who;
+      t.label = QObject::tr("%1  (sub-scene, + library of %2)")
+                    .arg(t.subScene, who);
+    }
+  }
+
+  // Il ripiego di prima, per il solo NOME della sotto-scena: quando la catena
+  // non trova la libreria e lo shot non ha set suoi.
   for (MouthApplyTarget &t : out) {
     if (characterScene) break;
     if (!t.map.sets.isEmpty() || t.subScene.isEmpty()) continue;
@@ -354,12 +482,20 @@ QVector<int> ZtoryMouthApply::findPhonemeColumns(TXsheet *xsh) {
     int r0 = 0, r1 = 0;
     c->getRange(r0, r1);
     // Si riconosce dal CONTENUTO: il nome della colonna e' rinominabile, i
-    // viseme no. Bastano poche celle riconosciute — una colonna di parole non
-    // le produce, salvo che qualcuno parli solo di «rest» ed «etc».
-    int hits = 0;
-    for (int r = r0; r <= r1 && hits < 3; r++)
-      if (ZtoryMouthMap::shapeIndex(phonemeAt(xsh, col, r)) >= 0) hits++;
-    if (hits >= 3) out.push_back(col);
+    // viseme no. Conta la PROPORZIONE, non poche celle: la colonna delle
+    // parole del lip sync scrive «rest» in ogni pausa, e con «bastano tre
+    // celle» passava per una colonna di fonemi — era la prima della tendina,
+    // e Apply leggeva le parole: 44 fotogrammi su 303, tutti pause (Franco,
+    // 2026-09-27, sh040). In una colonna di fonemi quasi tutte le celle
+    // piene sono viseme (qualche «—» di punteggiatura al massimo).
+    int hits = 0, filled = 0;
+    for (int r = r0; r <= r1; r++) {
+      const QString text = phonemeAt(xsh, col, r);
+      if (text.isEmpty()) continue;
+      filled++;
+      if (ZtoryMouthMap::shapeIndex(text) >= 0) hits++;
+    }
+    if (hits >= 3 && hits * 10 >= filled * 8) out.push_back(col);
   }
   return out;
 }
@@ -377,21 +513,30 @@ MouthApplyReport ZtoryMouthApply::apply(ToonzScene *scene, int phonemeCol,
   // Cosa scrivere, riga per riga della sotto-scena. Si RACCOGLIE tutto prima e
   // si scrive dopo: e' l'unico modo per accorgersi che due fotogrammi dello
   // shot cadono sulla stessa riga, che e' il caso che va detto e non risolto.
-  TXsheet *destXsh = nullptr;
-  int destCol      = -1;
-  QMap<int, TXshCell> planned;
-  QMap<int, QString> plannedShape;  // per rilevare i conflitti
+  //
+  // ⚠️ Per DESTINAZIONE, non una sola. Le bocche di un personaggio possono
+  // stare in piu' posti: SOFIA le ha nella colonna principale e anche dentro
+  // la sotto-scena della girata. Con una destinazione unica — quella del primo
+  // fotogramma — le righe trovate dentro la girata (0-9 LI') finivano scritte
+  // sulle righe 0-9 della colonna principale: bocche sbagliate all'inizio
+  // dello shot (Franco, 2026-09-27, sh040).
+  using Dest = QPair<TXsheet *, int>;
+  QMap<Dest, QMap<int, TXshCell>> planned;
+  QMap<Dest, QMap<int, QString>> plannedShape;  // per rilevare i conflitti
 
   for (const MouthApplyRange &rg : ranges) {
     const int si = target.map.indexOfSet(rg.setName);
-    if (si < 0) continue;
+    if (si < 0) {
+      rep.noSet += rg.to - rg.from + 1;
+      continue;
+    }
     const MouthSet &set = target.map.sets[si];
 
     for (int f = rg.from; f <= rg.to; f++) {
       const QString shape = phonemeAt(top, phonemeCol, f - 1);
-      if (shape.isEmpty()) continue;
+      if (shape.isEmpty()) { rep.noPhoneme++; continue; }
       const int idx = ZtoryMouthMap::shapeIndex(shape);
-      if (idx < 0) continue;
+      if (idx < 0) { rep.unknownShape++; continue; }
 
       // Dove cade questo fotogramma dentro l'albero delle sotto-scene.
       TXsheet *xsh = nullptr;
@@ -401,10 +546,6 @@ MouthApplyReport ZtoryMouthApply::apply(ToonzScene *scene, int phonemeCol,
         // cui non c'e' niente da animare.
         rep.offStage++;
         continue;
-      }
-      if (!destXsh) {
-        destXsh = xsh;
-        destCol = col;
       }
 
       // Il bersaglio sul livello ANCORA. Gli altri livelli (denti, lingua) li
@@ -420,115 +561,51 @@ MouthApplyReport ZtoryMouthApply::apply(ToonzScene *scene, int phonemeCol,
       // ⚠️ Due fotogrammi dello shot sulla STESSA riga della sotto-scena: c'e'
       // una cella sola. Succede su un fermo, ed e' esattamente il caso che
       // «vince l'ultimo» renderebbe invisibile.
-      auto prev = plannedShape.constFind(row);
-      if (prev != plannedShape.constEnd() && prev.value() != shape) {
+      const Dest dest(xsh, col);
+      auto prev = plannedShape[dest].constFind(row);
+      if (prev != plannedShape[dest].constEnd() && prev.value() != shape) {
         if (!rep.conflicts.contains(row + 1)) rep.conflicts.push_back(row + 1);
         continue;
       }
-      plannedShape[row] = shape;
+      plannedShape[dest][row] = shape;
 
       TXshCell cell = xsh->getCell(row, col);
       cell.m_level   = target.level;
       cell.m_frameId = chosen->frameId;
-      planned[row]   = cell;
+      planned[dest][row] = cell;
     }
   }
 
-  if (!destXsh || destCol < 0 || planned.isEmpty()) return rep;
+  if (planned.isEmpty()) return rep;
 
-  QMap<int, TXshCell> before;
-  for (auto it = planned.constBegin(); it != planned.constEnd(); ++it)
-    before[it.key()] = destXsh->getCell(it.key(), destCol);
-
-  for (auto it = planned.constBegin(); it != planned.constEnd(); ++it) {
-    destXsh->setCell(it.key(), destCol, it.value());
-    rep.written++;
+  // Una sola voce nella cronologia: annullare deve togliere tutto il lip sync
+  // applicato, non una destinazione per volta.
+  TUndoManager::manager()->beginBlock();
+  for (auto d = planned.constBegin(); d != planned.constEnd(); ++d) {
+    TXsheet *dx = d.key().first;
+    const int dc = d.key().second;
+    QMap<int, TXshCell> before;
+    for (auto it = d.value().constBegin(); it != d.value().constEnd(); ++it)
+      before[it.key()] = dx->getCell(it.key(), dc);
+    for (auto it = d.value().constBegin(); it != d.value().constEnd(); ++it) {
+      dx->setCell(it.key(), dc, it.value());
+      rep.written++;
+    }
+    TUndoManager::manager()->add(new MouthApplyUndo(dx, dc, before, d.value()));
+    QString where = QObject::tr("column %1").arg(dc + 1);
+    if (TStageObject *so = dx->getStageObject(TStageObjectId::ColumnId(dc))) {
+      const QString n = QString::fromStdString(so->getName());
+      if (!n.isEmpty()) where = n;
+    }
+    rep.destinations << QObject::tr("%1 (%2 frames)").arg(where).arg(d.value().size());
   }
-  TUndoManager::manager()->add(
-      new MouthApplyUndo(destXsh, destCol, before, planned));
+  TUndoManager::manager()->endBlock();
   TApp::instance()->getCurrentXsheet()->notifyXsheetChanged();
   TApp::instance()->getCurrentScene()->setDirtyFlag(true);
 
-  // ⚠️ LE CELLE SONO STATE SCRITTE DENTRO UNA SOTTO-SCENA, ma chi guarda e'
-  // l'xsheet di sopra: la sua immagine resta quella di prima, e
-  // notifyXsheetChanged() non la rifa'. Sintomo esatto (Franco, 2026-08-17):
-  // applicato il set giusto, nel main restavano visibili le bocche del set
-  // sbagliato; entrando nella sotto-scena si vedevano quelle giuste, e
-  // uscendo il main si aggiornava. Non era un caso: uscire da una sotto-scena
-  // invalida l'icona del livello che la espone (subscenecommand.cpp,
-  // closeSubXsheet). Qui si fa la stessa cosa senza dover entrare e uscire.
-  //
-  // ⚠️ NON si svuota TImageCache: cancellerebbe anche i disegni su cui si sta
-  // lavorando, col cursore a pallino rosso per cache miss (vedi la nota in
-  // ztorymodel.cpp, ZtoryModel::activateShotForViewing).
-  if (TXsheet *cur = TApp::instance()->getCurrentXsheet()->getXsheet()) {
-    if (cur != destXsh) {
-      // ⚠️ NON basta la sotto-scena che e' cambiata: vanno invalidate TUTTE
-      // quelle che la contengono, fino a quella che si vede da qui.
-      //
-      // Le bocche stanno annidate — shot ▸ personaggio ▸ (magari) testa ▸
-      // bocche — e ogni livello tiene la propria immagine composita: quella del
-      // personaggio non si rifa' solo perche' e' cambiata quella dentro. Prima
-      // invalidavo solo l'anello piu' interno, e l'aggiornamento arrivava solo
-      // aprendo a mano tutte le nidificazioni (Franco, 2026-08-17) — cioe'
-      // facendo a mano, uscendo, cio' che closeSubXsheet fa a ogni livello.
-      //
-      // Si scende dall'xsheet corrente e si invalida ogni anello della catena
-      // che porta a quello modificato. Solo quella catena: invalidare tutto
-      // vorrebbe dire rigenerare i personaggi che non c'entrano.
-      std::function<bool(TXsheet *, std::set<TXsheet *> &)> invalidateChain =
-          [&](TXsheet *xsh, std::set<TXsheet *> &seen) -> bool {
-        if (!xsh || !seen.insert(xsh).second) return false;
-        if (xsh == destXsh) {
-          // ⚠️ QUESTA E' LA CACHE VERA, e non erano le icone.
-          //
-          // Il viewer NON tiene un'immagine composita: `stage.cpp` ricorre dal
-          // vivo dentro le sotto-scene a ogni ridisegno. Tiene pero' una
-          // TEXTURE OpenGL del CONTENUTO DI UN XSHEET a un dato fotogramma
-          // (`texture_utils::getTextureData(const TXsheet*, int)`), e cambiare
-          // le celle dentro quell'xsheet non la tocca. E' il motivo per cui
-          // uscire dalla sotto-scena aggiustava tutto: TXsheetHandle::setXsheet
-          // chiama invalidateTextures() con il commento «we'll be editing
-          // m_xsheet - so destroy every texture of his».
-          texture_utils::invalidateTextures(xsh);
-          return true;
-        }
-        bool onPath = false;
-        for (int c = 0; c < xsh->getColumnCount(); c++) {
-          int r0 = 0, r1 = -1;
-          xsh->getCellRange(c, r0, r1);
-          std::set<TXshLevel *> done;
-          for (int r = r0; r <= r1; r++) {
-            const TXshCell cell = xsh->getCell(r, c);
-            if (cell.isEmpty() || !cell.m_level) continue;
-            TXshChildLevel *cl = cell.m_level->getChildLevel();
-            if (!cl || !done.insert(cell.m_level.getPointer()).second) continue;
-            if (!invalidateChain(cl->getXsheet(), seen)) continue;
-            // Questa sotto-scena contiene cio' che e' cambiato: la sua icona
-            // non vale piu' su NESSUN fotogramma esposto, non solo sul primo.
-            for (int rr = r0; rr <= r1; rr++) {
-              const TXshCell cc = xsh->getCell(rr, c);
-              if (!cc.isEmpty() && cc.m_level.getPointer() ==
-                                       cell.m_level.getPointer())
-                IconGenerator::instance()->invalidate(cc.m_level.getPointer(),
-                                                      cc.m_frameId);
-            }
-            onPath = true;
-          }
-        }
-        // Anche gli ANELLI DI SOPRA: la texture di un xsheet e' il suo
-        // contenuto composito, quindi quella del personaggio contiene le bocche
-        // ed e' vecchia quanto la loro.
-        if (onPath) texture_utils::invalidateTextures(xsh);
-        return onPath;
-      };
-      std::set<TXsheet *> seen;
-      invalidateChain(cur, seen);
-
-      // La notifica che rifa' il render composito — la stessa che l'animatic usa
-      // dopo le sue modifiche.
-      TApp::instance()->getCurrentScene()->notifySceneChanged();
-    }
-  }
+  QSet<TXsheet *> destXshs;
+  for (auto d = planned.constBegin(); d != planned.constEnd(); ++d)
+    destXshs.insert(d.key().first);
+  invalidateMouthDestinations(destXshs);
   return rep;
 }

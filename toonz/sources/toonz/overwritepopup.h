@@ -6,6 +6,8 @@
 // TnzQt includes
 #include "toonzqt/dvdialog.h"
 
+#include <cassert>
+
 //===========================================================
 
 //    Forward declarations
@@ -90,6 +92,14 @@ public:
 
   //! Resets state variables
   void reset();
+
+  //! Ztoryc: answers every conflict with \p res without showing the dialog,
+  //! as if «Apply to all» had been chosen with it (the silent import).
+  void presetChoice(Resolution res) {
+    assert(res != CANCELED);  // an answer, not a refusal
+    m_applyToAll = true;
+    m_choice     = res;
+  }
 
   /*! this method has to be called for each filepath to be imported. Only if
 necessary, it opens a popup.

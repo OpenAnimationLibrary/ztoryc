@@ -81,8 +81,12 @@ ZtoryMouthApplyPopup::ZtoryMouthApplyPopup()
   lay->addWidget(m_note);
 
   m_applyBt = new QPushButton(tr("Apply"), this);
+  // Apply does not close: the report stays to be read. So a way out that is
+  // not the window's title bar (Franco, 2026-09-27).
+  auto *closeBt = new QPushButton(tr("Close"), this);
   addWidget(top);
-  addButtonBarWidget(m_applyBt);
+  addButtonBarWidget(m_applyBt, closeBt);
+  connect(closeBt, &QPushButton::clicked, this, &QDialog::close);
 
   connect(m_targetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &ZtoryMouthApplyPopup::onTargetChanged);
@@ -196,8 +200,14 @@ QComboBox *ZtoryMouthApplyPopup::makeSetCombo(const QString &current) const {
   auto *cb = new QComboBox();
   const int ti = m_targetCombo->currentIndex();
   if (ti >= 0 && ti < m_targets.size())
-    for (const MouthSet &ms : m_targets[ti].map.sets) cb->addItem(ms.name);
-  const int i = cb->findText(current);
+    // The set's NAME rides in the item's data: it is what apply looks the set
+    // up by, and the text may say where it comes from.
+    for (const MouthSet &ms : m_targets[ti].map.sets)
+      cb->addItem(ms.fromLibrary.isEmpty()
+                      ? ms.name
+                      : tr("%1 — from %2").arg(ms.name, ms.fromLibrary),
+                  ms.name);
+  const int i = cb->findData(current);
   if (i >= 0) cb->setCurrentIndex(i);
   return cb;
 }
@@ -233,7 +243,7 @@ void ZtoryMouthApplyPopup::onTargetChanged(int) {
   // punterebbero a nomi che qui non esistono.
   for (int r = 0; r < m_table->rowCount(); r++) {
     auto *old = qobject_cast<QComboBox *>(m_table->cellWidget(r, 2));
-    m_table->setCellWidget(r, 2, makeSetCombo(old ? old->currentText()
+    m_table->setCellWidget(r, 2, makeSetCombo(old ? old->currentData().toString()
                                                   : QString()));
   }
 }
@@ -272,7 +282,7 @@ QVector<MouthApplyRange> ZtoryMouthApplyPopup::readRanges(QString *why) const {
     auto *to   = qobject_cast<QSpinBox *>(m_table->cellWidget(r, 1));
     auto *set  = qobject_cast<QComboBox *>(m_table->cellWidget(r, 2));
     if (!from || !to || !set) continue;
-    if (set->currentText().isEmpty()) continue;
+    if (set->currentData().toString().isEmpty()) continue;
     // Un tratto rovesciato e' quasi sempre un refuso: si dice invece di
     // ignorarlo in silenzio, o l'utente crederebbe applicato un pezzo che non
     // lo e'.
@@ -285,7 +295,7 @@ QVector<MouthApplyRange> ZtoryMouthApplyPopup::readRanges(QString *why) const {
     MouthApplyRange rg;
     rg.from    = from->value();
     rg.to      = to->value();
-    rg.setName = set->currentText();
+    rg.setName = set->currentData().toString();
     out.push_back(rg);
   }
   return out;

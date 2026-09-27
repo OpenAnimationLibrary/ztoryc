@@ -83,6 +83,13 @@ struct KitsuCastingEntry {
   QString label;          // free label (seen in the wild: "animate")
 };
 
+// The WHOLE breakdown of one shot, to write on Kitsu: its PUT replaces the
+// shot's casting, so a missing line is a line removed.
+struct KitsuCastingPush {
+  QString                    kitsuShotId;
+  QVector<KitsuCastingEntry> entries;  // kitsuAssetId, nbOccurrences, label
+};
+
 //----------------------------------------------------------------------------
 // A Kitsu task status (/api/data/task-status). The semantic flags drive the
 // mapping onto Ztoryc's enum, so a renamed pipeline still maps sanely without
@@ -242,9 +249,26 @@ public:
   // (2026-09-26). Same caches and state as the safe push, none shared with
   // the full push/pull/upload. Returns a token; the answer comes with
   // reviewPreviewUploaded(token, …).
+  // `comment`: the comment's text; empty = the review one.
+  // `keepServerStatus`: the comment carries the status the task has ON
+  // KITSU (`status` is ignored) — Ztoryc reads «approved» and «done» both as
+  // Done, and sending Done would turn an Approved into done. Kitsu also runs
+  // its status automations at every comment, changed or not: if one of the
+  // project's starts from the task's type and status, nothing is posted and
+  // reviewPreviewSkipped(token, why) answers instead.
   int uploadReviewPreview(int entity, const QString &kitsuEntityId,
                           const QString &taskType, const QString &filePath,
-                          TaskStatus status);
+                          TaskStatus status,
+                          const QString &comment = QString(),
+                          bool keepServerStatus  = false);
+  // Makes the entity's cover the LATEST preview already on its `taskType`
+  // task, skipping the comments whose text is `skipText` (the Sync's own
+  // asset previews). For a rigged character: the render of the rig, which
+  // the WFA uploaded (Franco, 2026-09-27). No comment is posted.
+  // -> taskCoverSet(token, result, message)
+  enum TaskCoverResult { CoverSet = 0, CoverNoPreview = 1, CoverFailed = 2 };
+  int setCoverFromTaskPreview(int entity, const QString &kitsuEntityId,
+                              const QString &taskType, const QString &skipText);
 
   // --- Config (persisted in QSettings, group "Ztoryc/Kitsu") -----------
   QString baseUrl() const { return m_baseUrl; }
@@ -325,6 +349,10 @@ public:
   // for that episode's sequences. -> breakdownPulled()
   void pullBreakdown(const QString &projectId,
                      const QString &episodeId = QString());
+  // Writes each shot's whole breakdown, one PUT per shot, one after the
+  // other. A shot that fails does not stop the others. -> castingPushed()
+  void pushCasting(const QString &projectId,
+                   const QVector<KitsuCastingPush> &shots);
 
   // Bidirectional asset sync. pushAssets creates the assets missing in Kitsu
   // (upsert by type+name, resolving each canonical type onto a Kitsu asset-type)
@@ -412,6 +440,11 @@ signals:
   void episodesFetched(const QMap<QString, QVector<KitsuEpisode>> &episodes);
   void breakdownPulled(bool ok, const QVector<KitsuCastingEntry> &entries,
                        const QString &message);
+  // `written`: the Kitsu ids of the shots whose breakdown Kitsu now has.
+  // ok is false if at least one shot failed; message says the first error.
+  void castingPushed(bool ok, const QStringList &written,
+                     const QString &message);
+  void castingProgress(int done, int total);  // after each shot's PUT
   void taskStatusesFetched(const QVector<KitsuTaskStatus> &statuses);
   void projectCreated(bool ok, const KitsuProject &project, const QString &message);
   void projectUpdated(bool ok, const QString &message);
@@ -446,6 +479,8 @@ signals:
   // One queued status change was handled. result: TransitionResult;
   // serverStatus: the TaskStatus Kitsu had (meaningful for TrConflict).
   void reviewPreviewUploaded(int token, bool ok, const QString &message);
+  void reviewPreviewSkipped(int token, const QString &why);
+  void taskCoverSet(int token, int result, const QString &message);
   // Asset task statuses changed in Ztoryc but not sent: their task type is
   // not linked to the asset type on Kitsu (which hides such tasks).
   void assetTasksUnlinked(int count);
@@ -667,6 +702,13 @@ private:
   QHash<int, QString>     m_trStatusIdByZ;  // TaskStatus -> canonical id
   bool                    m_autoPushStatus = false;
   int                     m_revToken = 0;
+  // The project's status automations that are not archived, as
+  // «taskTypeId|statusId» of what starts them; read once per login and
+  // project (/api/data/projects/<id> + /api/data/status-automations).
+  QSet<QString>           m_revAutomations;
+  QString                 m_revAutomationsProject;  // empty = not loaded
+  void revLoadAutomations(std::function<void()> onDone,
+                          std::function<void(const QString &)> onFail);
   void trNext();
   // Loads the safe push's caches, then calls onDone (or onFail).
   void trLoadCaches(std::function<void()> onDone,

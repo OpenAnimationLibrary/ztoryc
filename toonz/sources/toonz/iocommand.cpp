@@ -99,7 +99,9 @@
 #include <boost/utility/in_place_factory.hpp>
 
 // Ztoryc
-#include "ztorycharacterreview.h"  // offerWfaOnClose in saveSceneIfNeeded
+#include "ztorycharacterreview.h"
+#include "ztorymouthlibrary.h"
+#include "ztoriglibrary.h"  // offerWfaOnClose in saveSceneIfNeeded
 
 // #define USE_SQLITE_HDPOOL
 
@@ -107,6 +109,55 @@ using namespace DVGui;
 
 //-----------------------------------------------------------------------------
 namespace {
+//-----------------------------------------------------------------------------
+
+// Ztoryc: where load errors go while a silent load runs
+// (LoadResourceArguments::silent); null = a popup, as always. A pointer set
+// for the length of one call, like loadedPsdLevelIndex below: loadLevel
+// catches its own exceptions, several calls down, with ten parameters of its
+// own already.
+QStringList *silentLoadErrors = nullptr;
+
+struct SilentLoadScope {
+  QStringList *m_previous;
+  SilentLoadScope(bool silent, QStringList *errors)
+      : m_previous(silentLoadErrors) {
+    if (silent) silentLoadErrors = errors;
+  }
+  ~SilentLoadScope() { silentLoadErrors = m_previous; }
+};
+
+// Ztoryc: when the files behind a level were last changed — the newest of
+// them. A PSD layer level «bg#7#group.psd» is the file «bg.psd»; a numbered
+// sequence «a..png» is a.0001.png, a.0002.png…
+QDateTime newestModified(const TFilePath &level) {
+  TFilePath fp = level;
+  if (fp.getType() == "psd") {
+    const std::wstring name = fp.getWideName();
+    const std::wstring::size_type hash = name.find(L'#');
+    if (hash != std::wstring::npos)
+      fp = fp.getParentDir() + TFilePath(name.substr(0, hash) + L".psd");
+  }
+  const QFileInfo fi(fp.getQString());
+  if (fi.isFile()) return fi.lastModified();
+  QDateTime newest;
+  const QString name = QString::fromStdWString(fp.getWideName());
+  const QString ext  = QString::fromStdString(fp.getType());
+  const QDir dir(fi.absolutePath());
+  for (const QFileInfo &f :
+       dir.entryInfoList(QStringList() << name + ".*." + ext, QDir::Files))
+    if (!newest.isValid() || f.lastModified() > newest)
+      newest = f.lastModified();
+  return newest;
+}
+
+void reportLoadError(const QString &msg) {
+  if (silentLoadErrors)
+    *silentLoadErrors << msg;
+  else
+    error(msg);
+}
+
 //-----------------------------------------------------------------------------
 
 TXshLevel *getLevelByPath(ToonzScene *scene, const TFilePath &actualPath);
@@ -126,6 +177,9 @@ class ResourceImportDialog final : public ResourceImportStrategy {
   TFilePath m_dstFolder;
   bool m_importEnabled;
   std::map<TFilePath, TFilePath> m_importedFiles;
+  bool m_silent          = false;    // Ztoryc
+  QStringList *m_errors  = nullptr;  // Ztoryc
+  TFilePath m_importScenePath;       // Ztoryc: see LoadResourceArguments
 
 public:
   enum Resolution { A_IMPORT, A_LOAD, A_CANCEL };
@@ -146,6 +200,28 @@ public:
   }
 
   bool isImportEnabled() const { return m_importEnabled; }
+
+  // Ztoryc: no questions (LoadResourceArguments::silent). An existing file
+  // is kept, and errors are collected instead of shown.
+  void setSilent(QStringList *errors) {
+    m_silent = true;
+    m_errors = errors;
+    m_dialog->presetChoice(OverwriteDialog::KEEP_OLD);
+    // «Import or load?» answered too: loaded where it is.
+    if (!m_importQuestionAsked) setImportEnabled(false);
+  }
+  bool isSilent() const { return m_silent; }
+  void setImportScenePath(const TFilePath &p) { m_importScenePath = p; }
+  void reportError(const QString &msg) {
+    if (m_silent && m_errors) {
+      *m_errors << msg;
+      return;
+    }
+    DVGui::Dialog *errorDialog =
+        DVGui::createMsgBox(DVGui::WARNING, msg, QStringList("OK"), 0);
+    errorDialog->exec();
+    errorDialog->deleteLater();
+  }
   void setImportEnabled(bool enabled) {
     m_importQuestionAsked = true, m_importEnabled = enabled;
   }
@@ -242,15 +318,38 @@ public:
         std::wstring tailHead;
         TFilePath tailTail;
         tail.split(tailHead, tailTail);
+        // Ztoryc: the scene the import is for (importScenePath), which is
+        // not always the one open.
+        // Its save path (relative to scenes/), as the other branch and the
+        // export's shot folder compute it: with a storyboard in a sub-folder
+        // of scenes/ the bare name would give another folder.
+        TFilePath destSceneFolder(scene->getScenePath().getName());
+        if (!m_importScenePath.isEmpty()) {
+          ToonzScene target;
+          target.setProject(scene->getProject());
+          target.setScenePath(m_importScenePath);
+          destSceneFolder = target.getSavePath();
+        }
         if (TFilePath(tailHead) == m_dstFolder) {
           // Asset already has subscene folder in path (standard Tahoma settings).
           // Prefix with destination scene name to isolate the copy.
           // +extras/lib_bimba/ch.psd => +extras/scSH020/lib_bimba/ch.psd
-          TFilePath destSceneFolder(scene->getScenePath().getName());
           dstPath = TFilePath(head) + destSceneFolder + tail;
-        } else
+        } else if (!m_importScenePath.isEmpty())
+          // Ztoryc: inside the target scene's folder, as the branch above.
+          dstPath = TFilePath(head) + destSceneFolder + m_dstFolder + tail;
+        else
           dstPath = TFilePath(head) + m_dstFolder + tail;
       }
+    } else if (!m_importScenePath.isEmpty()) {
+      // Ztoryc: where the project puts it FOR THAT scene («use scene path»
+      // names the scene's folder).
+      ToonzScene target;
+      target.setProject(scene->getProject());
+      target.setScenePath(m_importScenePath);
+      dstPath = target.getImportedLevelPath(srcPath);
+      if (m_dstFolder != TFilePath())
+        dstPath = dstPath.withParentDir(dstPath.getParentDir() + m_dstFolder);
     } else {
       dstPath = scene->getImportedLevelPath(srcPath);
       // override the folder
@@ -269,13 +368,37 @@ public:
 
     // possibly, a level already exists
     bool overwritten = false;
-    if (TSystem::doesExistFileOrLevel(actualDstPath)) {
+    // Ztoryc, silently: THE NEWER FILE WINS (Franco, 2026-09-27). A copy in the
+    // shot older than its source — the background artist updated the PSD —
+    // is replaced; a newer one — touched in the shot after the export — is
+    // kept. Asking is what the silent import must not do, and keeping always
+    // delivered an outdated background with no more than a line in the log.
+    if (m_silent && TSystem::doesExistFileOrLevel(actualDstPath)) {
+      const QDateTime src = newestModified(actualSrcPath);
+      const QDateTime dst = newestModified(actualDstPath);
+      if (!(src.isValid() && dst.isValid() && src > dst)) {
+        if (m_errors)
+          *m_errors << QObject::tr("kept the existing copy of %1 (not older "
+                                   "than its source)")
+                           .arg(toQString(dstPath));
+        return dstPath;
+      }
+      if (m_errors)
+        *m_errors << QObject::tr("replaced %1: its source is newer")
+                         .arg(toQString(dstPath));
+      overwritten = true;
+    } else if (TSystem::doesExistFileOrLevel(actualDstPath)) {
       std::wstring newName =
           m_dialog->execute(scene, dstPath, m_isLastResource == false);
       if (m_dialog->cancelPressed()) return srcPath;
       int importMode = m_dialog->getChoice();
-      if (importMode == OverwriteDialog::KEEP_OLD)
+      if (importMode == OverwriteDialog::KEEP_OLD) {
+        // Ztoryc: said, so an older copy in the shot is not a surprise.
+        if (m_silent && m_errors)
+          *m_errors << QObject::tr("kept the existing copy of %1")
+                           .arg(toQString(dstPath));
         return dstPath;
+      }
       else if (importMode == OverwriteDialog::OVERWRITE)
         overwritten = true;
       else {
@@ -292,21 +415,10 @@ public:
       if (TSystem::doesExistFileOrLevel(actualSrcPath))
         TXshSimpleLevel::copyFiles(actualDstPath, actualSrcPath);
     } catch (TException &e) {
-      DVGui::Dialog *errorDialog = DVGui::createMsgBox(
-          DVGui::WARNING,
-          "Can't copy resources: " + QString::fromStdWString(e.getMessage()),
-          QStringList("OK"), 0);
-
-      errorDialog->exec();
-      errorDialog->deleteLater();
+      reportError("Can't copy resources: " +
+                  QString::fromStdWString(e.getMessage()));
     } catch (...) {
-      DVGui::Dialog *errorDialog = DVGui::createMsgBox(
-          DVGui::WARNING,
-          "Can't copy resources: Unhandled exception encountered",
-          QStringList("OK"), 0);
-
-      errorDialog->exec();
-      errorDialog->deleteLater();
+      reportError("Can't copy resources: Unhandled exception encountered");
     }
     // notify
     FileBrowser::refreshFolder(actualDstPath.getParentDir());
@@ -864,10 +976,13 @@ TXshLevel *loadChildLevel(ToonzScene *parentScene, TFilePath actualPath,
   TCamera *camera            = cameraObject->getCamera();
 
   // if the camera settings are different ask the user
+  // Ztoryc: silently, the sub-xsheet keeps its own camera (the first answer,
+  // and the one that changes nothing).
   const double eps = 0.00001;
-  if (fabs(camera->getSize().lx - childCamera->getSize().lx) > eps ||
+  if (!importStrategy.isSilent() &&
+      (fabs(camera->getSize().lx - childCamera->getSize().lx) > eps ||
       fabs(camera->getSize().ly - childCamera->getSize().ly) > eps ||
-      camera->getRes() != childCamera->getRes()) {
+      camera->getRes() != childCamera->getRes())) {
     QString question(QObject::tr(
         "The camera settings of the scene you are loading as sub-xsheet are "
         "different from those of your current scene. What you want to do?"));
@@ -1008,8 +1123,8 @@ TXshLevel *loadLevel(ToonzScene *scene,
       else
         xl = scene->loadLevel(actualPath, rd.m_options ? &*rd.m_options : 0);
       if (!xl) {
-        error("Failed to create level " + toQString(actualPath) +
-              " : this filetype is not supported.");
+        reportLoadError("Failed to create level " + toQString(actualPath) +
+                        " : this filetype is not supported.");
         return 0;
       }
 
@@ -1028,22 +1143,24 @@ TXshLevel *loadLevel(ToonzScene *scene,
 
       QString msg = QString::fromStdWString(e.getMessage());
       if (msg == QString("Old 4.1 Palette"))
-        error("It is not possible to load the level " + toQString(actualPath) +
-              " because its version is not supported.");
+        reportLoadError("It is not possible to load the level " +
+                        toQString(actualPath) +
+                        " because its version is not supported.");
       else
-        error(QString::fromStdWString(e.getMessage()));
+        reportLoadError(QString::fromStdWString(e.getMessage()));
 
       return 0;
     } catch (...) {
       if (convertingPopup->isVisible()) convertingPopup->hide();
-      error("Unhandled exception encountered");
+      reportLoadError("Unhandled exception encountered");
       return 0;
     }
 
     if (xl->getSimpleLevel() &&
         xl->getSimpleLevel()->getProperties()->isForbidden()) {
-      error("It is not possible to load the level " + toQString(actualPath) +
-            " because its version is not supported.");
+      reportLoadError("It is not possible to load the level " +
+                      toQString(actualPath) +
+                      " because its version is not supported.");
       scene->getLevelSet()->removeLevel(xl);
       return 0;
     }
@@ -1749,6 +1866,13 @@ bool IoCmd::saveScene(const TFilePath &path, int flags) {
   // that did not reach the disk would split the two again.
   if (sceneWritten && !saveSubxsheet)
     ZtoryModel::instance()->notifySceneSaved();
+  // Ztoryc: mouth sets made here and not in the character's library — offered
+  // after a save by the user; not the autosave, not the export's sub-scene
+  // saves (ztorymouthlibrary.h).
+  if (sceneWritten && !saveSubxsheet && !isAutosave) {
+    ZtoryMouthLibrary::offerOnSave();
+    ZtoRigLibrary::offerOnSave();  // poses and correctives, same model
+  }
 
   return true;
 }
@@ -2372,6 +2496,10 @@ bool IoCmd::loadScene(const TFilePath &path, bool updateRecentFile,
   printf("%s:%s loadScene() completed :\n", __FILE__, __FUNCTION__);
 
   TApp::instance()->getPaletteController()->editLevelPalette();
+  // Ztoryc: mouth sets the characters' libraries have and this scene's
+  // imported copies do not (ztorymouthlibrary.h). After the load, not in it.
+  ZtoryMouthLibrary::offerOnOpen();
+  ZtoRigLibrary::offerOnOpen();
   return true;
 }
 
@@ -2579,9 +2707,9 @@ static int createSubXSheetFromPSDFolder(IoCmd::LoadResourceArguments &args,
         xl = ::loadResource(scene, psdpath, args.castFolder, row0, col0, row1,
                             col1, false);
       } catch (TException &e) {
-        error(QString::fromStdWString(e.getMessage()));
+        reportLoadError(QString::fromStdWString(e.getMessage()));
       } catch (...) {
-        error("Unhandled exception encountered");
+        reportLoadError("Unhandled exception encountered");
       }
       if (xl) {
         // lo importo nell'xsheet
@@ -2650,9 +2778,9 @@ static int loadPSDResource(IoCmd::LoadResourceArguments &args,
         xl = ::loadResource(scene, psdpath, args.castFolder, row0, col0, row1,
                             col1, !popup->subxsheet());
       } catch (TException &e) {
-        error(QString::fromStdWString(e.getMessage()));
+        reportLoadError(QString::fromStdWString(e.getMessage()));
       } catch (...) {
-        error("Unhandled exception encountered");
+        reportLoadError("Unhandled exception encountered");
       }
       if (xl) {
         // lo importo nell'xsheet
@@ -2691,6 +2819,7 @@ int IoCmd::loadPsdResource(IoCmd::LoadResourceArguments &args,
   // Un blocco di annullamento come quello di loadResources: senza, le colonne
   // create dal psd non si annullano insieme al resto del caricamento.
   LoadResourceArguments::ScopedBlock sb;
+  SilentLoadScope silentScope(args.silent, &args.errors);  // Ztoryc
   return loadPSDResource(args, updateRecentFile, popup);
 }
 
@@ -2816,6 +2945,10 @@ int IoCmd::loadResources(LoadResourceArguments &args, bool updateRecentFile,
     importDialog.setImportEnabled(args.importPolicy ==
                                   LoadResourceArguments::IMPORT);
   }
+  if (args.silent) importDialog.setSilent(&args.errors);  // Ztoryc
+  if (!args.importScenePath.isEmpty())                     // Ztoryc
+    importDialog.setImportScenePath(args.importScenePath);
+  SilentLoadScope silentScope(args.silent, &args.errors);  // Ztoryc
 
   std::vector<TFilePath> paths;
   int all = 0;
@@ -2834,6 +2967,11 @@ int IoCmd::loadResources(LoadResourceArguments &args, bool updateRecentFile,
       path = TFilePath(path.getLevelNameW()).withParentDir(path.getParentDir());
 
     if (std::find(paths.begin(), paths.end(), path) != paths.end()) {
+      if (args.silent) {  // Ztoryc: loaded once, not asked
+        args.errors << QObject::tr("%1: already loaded, not loaded twice")
+                           .arg(toQString(path));
+        continue;
+      }
       if (!all) {
         QString question =
             QObject::tr(
@@ -2912,6 +3050,10 @@ int IoCmd::loadResources(LoadResourceArguments &args, bool updateRecentFile,
         args.loadedLevels.push_back(xl);
         app->getCurrentXsheet()->notifyXsheetSoundChanged();
       } catch (...) {
+        // Ztoryc: silently, at least a trace (it was, and is, mute otherwise).
+        if (args.silent)
+          args.errors << QObject::tr("%1: the sub-xsheet could not be loaded")
+                             .arg(toQString(path));
       }
 
       importDialog.setIsLastResource(isLastResource);
@@ -2927,10 +3069,10 @@ int IoCmd::loadResources(LoadResourceArguments &args, bool updateRecentFile,
         path = importDialog.process(scene, 0, path);
         // path = scene->decodeFilePath(codedPath);
       } catch (std::string msg) {
-        error(QString::fromStdString(msg));
+        reportLoadError(QString::fromStdString(msg));
         continue;
       } catch (...) {
-        error("Unhandled exception encountered");
+        reportLoadError("Unhandled exception encountered");
         continue;
       }
 
@@ -2942,6 +3084,13 @@ int IoCmd::loadResources(LoadResourceArguments &args, bool updateRecentFile,
         popup = new PsdSettingsPopup();
       }
       popup->setPath(path);
+      // Ztoryc: a PSD needs its settings; silently they cannot be asked
+      // (ztoryLoadPsdWithPolicy gives them, via loadPsdResource).
+      if (args.silent) {
+        args.errors << QObject::tr("%1: a PSD needs its settings — not loaded")
+                           .arg(toQString(path));
+        continue;
+      }
 
       int ret = popup->exec();
       if (ret == 0) continue;
@@ -2974,9 +3123,9 @@ int IoCmd::loadResources(LoadResourceArguments &args, bool updateRecentFile,
               toQString(scene->decodeFilePath(path)), RecentFiles::Level);
         }
       } catch (TException &e) {
-        error(QString::fromStdWString(e.getMessage()));
+        reportLoadError(QString::fromStdWString(e.getMessage()));
       } catch (...) {
-        error("Unhandled exception encountered");
+        reportLoadError("Unhandled exception encountered");
       }
       // if load success
       if (xl) {

@@ -73,6 +73,15 @@ struct MouthApplyReport {
   int noMap    = 0;   //!< viseme senza bersaglio nel set
   int poses    = 0;   //!< bersagli «posa», che qui non si sanno scrivere
   int offStage = 0;   //!< fotogrammi in cui il personaggio non e' esposto
+  // Gli scarti che prima erano MUTI (2026-09-27: «44 frames written» su 303,
+  // e nessuno sapeva dire perche').
+  int noPhoneme    = 0;  //!< fotogrammi senza fonema nella colonna
+  int unknownShape = 0;  //!< testo che non e' un viseme conosciuto
+  int noSet        = 0;  //!< il set scelto non c'e' nella mappa
+  //! Dove si e' scritto: una voce per colonna di destinazione. Le bocche di un
+  //! personaggio possono stare in PIU' posti (SOFIA: la colonna principale e
+  //! la sotto-scena della girata).
+  QStringList destinations;
   //! Fotogrammi della SOTTO-SCENA su cui cadevano viseme diversi (un fermo, un
   //! ciclo riusato). Elencati, non contati: servono per andarci a guardare.
   QVector<int> conflicts;

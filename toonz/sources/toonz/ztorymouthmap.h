@@ -95,6 +95,9 @@ struct MouthSet {
   QString view;        //!< "front" | "profile" | "threequarter"
   QString expression;  //!< "happy" | "sad" | … (libera: non e' un'enum chiusa)
   QString variant;     //!< "up" | "down" — la bocca in su o in giu'
+  //! NON si salva: il personaggio dalla cui libreria il set arriva, quando lo
+  //! shot lo legge da li' e non ce l'ha di suo (ZtoryMouthApply::findTargets).
+  QString fromLibrary;
 
   //! ⚠️ UN VISEME PUO' PILOTARE PIU' LIVELLI INSIEME. Nel cutout la bocca e'
   //! un livello e i denti (o la lingua) un altro, e la posizione «AI» li deve

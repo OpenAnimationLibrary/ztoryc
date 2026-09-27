@@ -467,6 +467,7 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
                   !ok ? "color:#FF3860;" : warn ? "color:#FFB000;" : "color:#22D160;");
               m_kitsuSyncLabel->setText(summary);
             }
+            rebuildBreakdown();  // step 5 may have changed it
             updateKitsuButtons();
           });
   connect(sync, &ZtoryKitsuSync::assetTypesChanged, this,
@@ -477,70 +478,6 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
       m_kitsuSyncLabel->setStyleSheet("color:#22D160;");
       m_kitsuSyncLabel->setText(tr("Team from Kitsu: %1 added.").arg(added));
     }
-  });
-  connect(kc, &KitsuClient::breakdownPulled, this,
-          [this](bool ok, const QVector<KitsuCastingEntry> &entries,
-                 const QString &msg) {
-    if (!m_breakdownLabel) return;
-    if (!ok) {
-      m_breakdownLabel->setStyleSheet("color:#FF3860;");
-      m_breakdownLabel->setText(msg);
-      return;
-    }
-    ZtoryModel *mm = ZtoryModel::instance();
-
-    // Index by Kitsu id once, instead of scanning the vectors per entry: with
-    // 145 assets and dozens of shots the nested scan is the slow, quiet kind.
-    QHash<QString, int> shotByKitsuId, assetIdxByKitsuId;
-    for (int i = 0; i < (int)mm->projectShots().size(); i++) {
-      const QString &k = mm->projectShots()[i].kitsuShotId;
-      if (!k.isEmpty()) shotByKitsuId.insert(k, i);
-    }
-    for (int i = 0; i < (int)mm->assets().size(); i++) {
-      const QString &k = mm->assets()[i].kitsuAssetId;
-      if (!k.isEmpty()) assetIdxByKitsuId.insert(k, i);
-    }
-
-    // Kitsu is authoritative on the breakdown, so each touched shot is REPLACED
-    // rather than merged: a link removed on the web must disappear here too,
-    // and merging would make deletions impossible to propagate.
-    // Accumulated first, written after: a shot is replaced once, with its whole
-    // new list, instead of being cleared and refilled while we iterate.
-    QHash<int, QVector<BreakdownEntry>> byShot;
-    int linked = 0, unknownShot = 0, unknownAsset = 0;
-    for (const KitsuCastingEntry &e : entries) {
-      auto sit = shotByKitsuId.constFind(e.kitsuShotId);
-      if (sit == shotByKitsuId.constEnd()) { unknownShot++; continue; }
-      auto ait = assetIdxByKitsuId.constFind(e.kitsuAssetId);
-      if (ait == assetIdxByKitsuId.constEnd()) { unknownAsset++; continue; }
-
-      BreakdownEntry be;
-      be.assetUuid     = mm->assets()[*ait].uuid;
-      be.nbOccurrences = e.nbOccurrences;
-      be.label         = e.label;
-      byShot[*sit].push_back(be);
-      linked++;
-    }
-    for (auto it = byShot.constBegin(); it != byShot.constEnd(); ++it)
-      mm->setShotBreakdown(it.key(), it.value());
-    mm->saveProjectDb();
-    rebuildBreakdown();
-
-    // The two «unknown» counts are the useful part: an asset that never got
-    // pulled down, or a shot never pushed up, shows here as a number instead of
-    // as a breakdown that is quietly short.
-    QString extra;
-    if (unknownAsset > 0)
-      extra += QObject::tr(" — %1 skipped: asset not in this project (pull "
-                           "assets first)").arg(unknownAsset);
-    if (unknownShot > 0)
-      extra += QObject::tr(" — %1 skipped: shot not linked to Kitsu")
-                   .arg(unknownShot);
-    m_breakdownLabel->setStyleSheet(unknownAsset || unknownShot
-                                        ? "color:#F5A623;"
-                                        : "color:#22D160;");
-    m_breakdownLabel->setText(
-        QObject::tr("%1 (%2 linked)").arg(msg).arg(linked) + extra);
   });
   connect(kc, &KitsuClient::teamPulled, this,
           [this](bool ok, const QVector<KitsuPerson> &, const QString &msg) {
@@ -557,7 +494,12 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
     ZtoryModel *mm = ZtoryModel::instance();
     if (ok && mm->isKitsuLinked())
       KitsuClient::instance()->pullTeam(mm->kitsuProjectId());
+    maybeAutoSync();
   });
+  // The login asks for the statuses after it answers: the auto Sync waits
+  // for them (without, start() refuses — every status would read as Todo).
+  connect(kc, &KitsuClient::taskStatusesFetched, this,
+          [this](const QVector<KitsuTaskStatus> &) { maybeAutoSync(); });
   // Panel opened while already connected+linked (e.g. reopened room): pull now.
   if (kc->isLoggedIn() && m->isKitsuLinked())
     kc->pullTeam(m->kitsuProjectId());
@@ -1416,18 +1358,34 @@ void ZtoryProductionPanel::updateKitsuButtons() {
   if (m_kitsuHandlesSpin)  m_kitsuHandlesSpin->setEnabled(linked);
 }
 
+// The Sync that starts by itself when the connection to Kitsu is made, so
+// that Ztoryc works from Kitsu's latest. Same confirmation as the button
+// when it would write a lot (onKitsuSync).
+void ZtoryProductionPanel::maybeAutoSync() {
+  KitsuClient *kc = KitsuClient::instance();
+  if (!kc->isLoggedIn() || !kc->hasTaskStatuses()) return;
+  if (!ZtoryModel::instance()->isKitsuLinked()) return;
+  if (!ZtoryKitsuSync::instance()->takeAutoSync()) return;
+  onKitsuSync();
+}
+
 // Ztoryc: the one Sync button (2026-09-27). The work is ZtoryKitsuSync's;
 // here the confirmation of a large send, and the label.
 void ZtoryProductionPanel::onKitsuSync() {
   ZtoryKitsuSync *sync = ZtoryKitsuSync::instance();
   // The first Sync of a project (no base yet) can write many statuses on
   // Kitsu: say it before, not after.
-  const int toSend = ZtoryKitsuSync::pendingSends();
-  if (toSend > 10 &&
+  // Asset previews too: the first Sync after the update uploads them all,
+  // each replacing the asset's cover on Kitsu.
+  const int toSend   = ZtoryKitsuSync::pendingSends();
+  const int previews = ZtoryKitsuSync::pendingPreviews();
+  if ((toSend > 10 || previews > 10) &&
       DVGui::MsgBox(tr("This Sync will send %1 statuses from Ztoryc to Kitsu "
                        "(each only where Kitsu still has the status of the "
-                       "last sync).\n\nContinue?")
-                        .arg(toSend),
+                       "last sync) and upload %2 asset previews (each "
+                       "becomes the asset's cover on Kitsu).\n\nContinue?")
+                        .arg(toSend)
+                        .arg(previews),
                     tr("Sync"), tr("Cancel"), 1) != 1)
     return;
   const int handles =
@@ -2010,16 +1968,12 @@ QWidget *ZtoryProductionPanel::buildBreakdownTab() {
   auto *lay  = new QVBoxLayout(w);
 
   auto *btns = new QHBoxLayout();
-  m_breakdownPullBtn =
-      new QPushButton(QObject::tr("Pull breakdown from Kitsu"), w);
-  m_breakdownPullBtn->setToolTip(QObject::tr(
-      "Read from Kitsu which assets each shot needs (Kitsu calls it casting).\n"
-      "Read-only for now: nothing is sent back."));
-  btns->addWidget(m_breakdownPullBtn);
-  // ⚠️ Fino a oggi l'UNICO che scriveva il breakdown era la pull da Kitsu: su
-  // un progetto senza Kitsu non c'era modo di dire «questo shot ha bisogno di
-  // questo asset», e l'import degli asset all'export non avrebbe mai potuto
-  // fare niente.
+  // The breakdown goes to and from Kitsu with «⇄ Sync with Kitsu» (step 5,
+  // merged on a base). The old «Pull breakdown from Kitsu» REPLACED each
+  // shot with Kitsu's list, and would now throw away what was added here.
+  // Written by hand too (+ Add, − Remove, from the dialogue): a project
+  // without Kitsu needs a breakdown as well, or the asset import at the
+  // export would have nothing to work on.
   auto *addBreakdownBtn = new QPushButton(QObject::tr("+ Add"), w);
   addBreakdownBtn->setToolTip(
       QObject::tr("Say by hand that a shot needs an asset."));
@@ -2039,8 +1993,6 @@ QWidget *ZtoryProductionPanel::buildBreakdownTab() {
           &ZtoryProductionPanel::onBreakdownRemove);
   connect(fromDialogueBtn, &QPushButton::clicked, this,
           &ZtoryProductionPanel::onBreakdownFromDialogue);
-  m_breakdownLabel = new QLabel(QString(), w);
-  btns->addWidget(m_breakdownLabel);
   btns->addStretch();
   lay->addLayout(btns);
 
@@ -2061,14 +2013,6 @@ QWidget *ZtoryProductionPanel::buildBreakdownTab() {
             if (it) linkAssetFileInteractive(it->data(Qt::UserRole).toInt());
           });
 
-  connect(m_breakdownPullBtn, &QPushButton::clicked, this, [this] {
-    ZtoryModel *m = ZtoryModel::instance();
-    if (!m->isKitsuLinked()) return;
-    m_breakdownLabel->setStyleSheet(QString());
-    m_breakdownLabel->setText(QObject::tr("Pulling breakdown…"));
-    KitsuClient::instance()->pullBreakdown(m->kitsuProjectId(),
-                                           m->kitsuEpisodeId());
-  });
   return w;
 }
 

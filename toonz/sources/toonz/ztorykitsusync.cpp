@@ -1,10 +1,14 @@
 #include "ztorykitsusync.h"
 
+#include "ztoryassetpreview.h"
 #include "ztorymodel.h"
 #include "ztorytaskflow.h"
 
 #include "toonzqt/dvdialog.h"
 
+#include <QFileInfo>
+#include <QSet>
+#include <QTemporaryDir>
 #include <QTimer>
 
 //=============================================================================
@@ -31,6 +35,212 @@ bool mergeAndCount(ZtoryTaskFlow::Entity entity, const QString &uuid,
   case ZtoryTaskFlow::Merge::Same: return false;
   }
   return false;
+}
+
+// --- Breakdown, three-way (2026-09-27) ---------------------------------
+// The same table as the statuses (ztorytaskflow.h), on each (shot, asset)
+// link, where «absent» is a value too: a link that is in the base and no
+// longer in Ztoryc was REMOVED in Ztoryc, and must go on Kitsu as well —
+// otherwise the two drift apart (Franco: «se le cancellazioni non si
+// propagano poi si disallinea»).
+// Without a base (a shot never synced, or re-created on Kitsu since) the two
+// sides are joined, and nothing is removed from either.
+
+struct CastingPlan {
+  QVector<KitsuCastingPush>               pushes;
+  QHash<QString, QVector<BreakdownEntry>> bases;  // by Kitsu shot id
+  int taken = 0, conflicts = 0;
+  int outOfScope = 0, sharedShotId = 0, notOnKitsuYet = 0;
+  QStringList unknownOnKitsu;  // assets Kitsu casts and Ztoryc does not have
+};
+
+using CastMap = QHash<QString, BreakdownEntry>;  // by asset uuid
+
+struct AssetIds {
+  QHash<QString, QString> uuidByKitsu, kitsuByUuid;
+};
+
+AssetIds assetIds() {
+  AssetIds ids;
+  for (const Asset &a : ZtoryModel::instance()->assets()) {
+    if (a.kitsuAssetId.isEmpty()) continue;
+    ids.uuidByKitsu.insert(a.kitsuAssetId, a.uuid);
+    ids.kitsuByUuid.insert(a.uuid, a.kitsuAssetId);
+  }
+  return ids;
+}
+
+// The three sides of one shot, keyed by asset uuid.
+struct CastSides {
+  CastMap                    local, server, base;
+  QStringList                order;  // Ztoryc's order, then Kitsu's additions
+  QVector<BreakdownEntry>    localOnly;      // asset not on Kitsu yet
+  QVector<KitsuCastingEntry> serverUnknown;  // asset Ztoryc does not know
+};
+
+CastSides castSidesOf(const ProjectShot &ps, bool hasBase,
+                      const QVector<KitsuCastingEntry> &serverLines,
+                      const AssetIds &ids) {
+  CastSides sd;
+  // An asset not on Kitsu yet cannot be in its breakdown: it stays here,
+  // out of the comparison.
+  for (const BreakdownEntry &be : ps.breakdown) {
+    if (!ids.kitsuByUuid.contains(be.assetUuid)) { sd.localOnly << be; continue; }
+    if (sd.local.contains(be.assetUuid)) continue;
+    sd.local.insert(be.assetUuid, be);
+    sd.order << be.assetUuid;
+  }
+  // An asset Ztoryc does not know is not ours to judge: it stays on Kitsu,
+  // passed through in the write (the PUT replaces the whole casting).
+  for (const KitsuCastingEntry &e : serverLines) {
+    const QString uuid = ids.uuidByKitsu.value(e.kitsuAssetId);
+    if (uuid.isEmpty()) { sd.serverUnknown << e; continue; }
+    if (sd.server.contains(uuid)) continue;
+    BreakdownEntry be;
+    be.assetUuid     = uuid;
+    be.nbOccurrences = e.nbOccurrences;
+    be.label         = e.label;
+    sd.server.insert(uuid, be);
+    if (!sd.order.contains(uuid)) sd.order << uuid;
+  }
+  if (hasBase)
+    for (const BreakdownEntry &be : ps.breakdownBase) {
+      if (sd.base.contains(be.assetUuid)) continue;
+      sd.base.insert(be.assetUuid, be);
+      if (!sd.order.contains(be.assetUuid)) sd.order << be.assetUuid;
+    }
+  return sd;
+}
+
+bool sameCast(const BreakdownEntry *a, const BreakdownEntry *b) {
+  if (!a || !b) return a == b;
+  return *a == *b;
+}
+
+// The table, on one link. nullptr = the link is not there.
+const BreakdownEntry *resolveLink(const BreakdownEntry *l,
+                                  const BreakdownEntry *s,
+                                  const BreakdownEntry *b, bool hasBase,
+                                  int &conflicts) {
+  if (!hasBase) return s ? s : l;  // joined; on a line both have, Kitsu's
+  const bool localChanged  = !sameCast(l, b);
+  const bool serverChanged = !sameCast(s, b);
+  if (!serverChanged) return l;
+  if (!localChanged || sameCast(l, s)) return s;
+  ++conflicts;  // changed on both sides, differently: Kitsu wins
+  return s;
+}
+
+const BreakdownEntry *findCast(const CastMap &m, const QString &uuid) {
+  auto it = m.constFind(uuid);
+  return it == m.constEnd() ? nullptr : &it.value();
+}
+
+// `inScope`: the Kitsu shots this Sync saw (statuses or casting). The bulk
+// casting lists only shots that HAVE links, so a missing shot may be empty
+// on Kitsu — or outside the bound episode, or deleted. With a base to lose,
+// only a shot seen elsewhere is trusted to be empty.
+CastingPlan planBreakdown(const QVector<KitsuCastingEntry> &entries,
+                          QSet<QString> inScope) {
+  ZtoryModel *m      = ZtoryModel::instance();
+  const AssetIds ids = assetIds();
+  QHash<QString, QVector<KitsuCastingEntry>> serverByShot;
+  for (const KitsuCastingEntry &e : entries) {
+    serverByShot[e.kitsuShotId] << e;
+    inScope.insert(e.kitsuShotId);
+  }
+  // Two Ztoryc shots on ONE Kitsu shot (same seq+label in two storyboards)
+  // would overwrite each other at every Sync: left out, and said.
+  QHash<QString, int> shotIdUses;
+  for (const ProjectShot &ps : m->projectShots())
+    if (!ps.kitsuShotId.isEmpty()) ++shotIdUses[ps.kitsuShotId];
+
+  CastingPlan plan;
+  QSet<QString> unknownNames;
+  for (int i = 0; i < (int)m->projectShots().size(); i++) {
+    const ProjectShot &ps = m->projectShots()[i];
+    if (ps.kitsuShotId.isEmpty()) continue;
+    if (shotIdUses.value(ps.kitsuShotId) > 1) { ++plan.sharedShotId; continue; }
+    const bool hasBase =
+        ps.hasBreakdownBase && ps.breakdownBaseShotId == ps.kitsuShotId;
+    if (hasBase && !ps.breakdownBase.isEmpty() &&
+        !inScope.contains(ps.kitsuShotId)) {
+      ++plan.outOfScope;
+      continue;
+    }
+    const CastSides sd =
+        castSidesOf(ps, hasBase, serverByShot.value(ps.kitsuShotId), ids);
+    plan.notOnKitsuYet += sd.localOnly.size();
+    for (const KitsuCastingEntry &e : sd.serverUnknown)
+      unknownNames.insert(e.assetName.isEmpty() ? e.kitsuAssetId : e.assetName);
+
+    QVector<BreakdownEntry> merged;
+    CastMap mergedMap;
+    for (const QString &uuid : sd.order) {
+      const BreakdownEntry *r =
+          resolveLink(findCast(sd.local, uuid), findCast(sd.server, uuid),
+                      findCast(sd.base, uuid), hasBase, plan.conflicts);
+      if (!r) continue;
+      merged << *r;
+      mergedMap.insert(uuid, *r);
+    }
+    // Compared as sets: the order, or an asset not on Kitsu yet sitting in
+    // the middle, is not a change.
+    if (mergedMap != sd.local) {
+      m->setShotBreakdown(i, merged + sd.localOnly);
+      ++plan.taken;
+    }
+    if (mergedMap == sd.server) {
+      m->setShotBreakdownBase(i, ps.kitsuShotId, merged);  // Kitsu has it
+      continue;
+    }
+    KitsuCastingPush push;
+    push.kitsuShotId = ps.kitsuShotId;
+    QSet<QString> sent;  // one line per Kitsu asset, or Zou may refuse it
+    for (const BreakdownEntry &be : merged) {
+      KitsuCastingEntry e;
+      e.kitsuAssetId  = ids.kitsuByUuid.value(be.assetUuid);
+      e.nbOccurrences = be.nbOccurrences;
+      e.label         = be.label;
+      if (sent.contains(e.kitsuAssetId)) continue;
+      sent.insert(e.kitsuAssetId);
+      push.entries << e;
+    }
+    for (const KitsuCastingEntry &e : sd.serverUnknown)
+      if (!sent.contains(e.kitsuAssetId)) {
+        sent.insert(e.kitsuAssetId);
+        push.entries << e;
+      }
+    plan.pushes << push;
+    plan.bases.insert(ps.kitsuShotId, merged);
+  }
+  plan.unknownOnKitsu = unknownNames.values();
+  plan.unknownOnKitsu.sort();
+  return plan;
+}
+
+// What step 5 left alone, said once in the end-of-Sync warnings: a
+// breakdown that is quietly short is the failure to avoid.
+QStringList breakdownWarnings(const CastingPlan &plan) {
+  QStringList out;
+  if (!plan.unknownOnKitsu.isEmpty())
+    out << ZtoryKitsuSync::tr("Breakdown: Kitsu casts %1 asset(s) this project does not have "
+            "(left as they are on Kitsu): %2")
+             .arg(plan.unknownOnKitsu.size())
+             .arg(plan.unknownOnKitsu.join(", "));
+  if (plan.notOnKitsuYet > 0)
+    out << ZtoryKitsuSync::tr("Breakdown: %1 link(s) to assets not on Kitsu yet stay only in "
+            "Ztoryc.")
+             .arg(plan.notOnKitsuYet);
+  if (plan.outOfScope > 0)
+    out << ZtoryKitsuSync::tr("Breakdown: %1 shot(s) skipped — not found in the Kitsu episode "
+            "this project is bound to.")
+             .arg(plan.outOfScope);
+  if (plan.sharedShotId > 0)
+    out << ZtoryKitsuSync::tr("Breakdown: %1 shot(s) skipped — they point at the same Kitsu "
+            "shot as another (same sequence and name in two storyboards).")
+             .arg(plan.sharedShotId);
+  return out;
 }
 
 // The Kitsu ids of the shots a push created or matched.
@@ -246,6 +456,30 @@ int applyTeam(const QVector<KitsuPerson> &persons) {
 // The Sync
 //=============================================================================
 
+namespace {
+
+// The signature of «the cover is the render of the rig»: no file of ours
+// behind it. A newer render replaces it by itself — the WFA upload makes it
+// the cover.
+QString rigCoverSignature(const Asset &a) {
+  return QStringLiteral("rigcover|") + a.kitsuAssetId;
+}
+
+// The character's Rigging task when it is Done on Kitsu, else empty.
+QString doneRigTask(const Asset &a) {
+  if (!ZtoryModel::isCharacterType(a.type)) return QString();
+  const QString rig = ZtoryTaskFlow::characterSceneTask(a.uuid);
+  if (rig.isEmpty()) return QString();
+  for (auto it = a.tasks.constBegin(); it != a.tasks.constEnd(); ++it)
+    if (it.key().compare(rig, Qt::CaseInsensitive) == 0)
+      return it.value().hasSynced && it.value().synced == TaskStatus::Done
+                 ? it.key()
+                 : QString();
+  return QString();
+}
+
+}  // namespace
+
 ZtoryKitsuSync *ZtoryKitsuSync::instance() {
   static ZtoryKitsuSync *s = new ZtoryKitsuSync();  // app lifetime
   return s;
@@ -262,7 +496,15 @@ int ZtoryKitsuSync::pendingSends() {
   return toSend;
 }
 
+bool ZtoryKitsuSync::takeAutoSync() {
+  const bool armed = m_autoSyncArmed;
+  m_autoSyncArmed  = false;
+  return armed;
+}
+
 ZtoryKitsuSync::ZtoryKitsuSync(QObject *parent) : QObject(parent) {
+  connect(KitsuClient::instance(), &KitsuClient::loginFinished, this,
+          [this](bool ok, const QString &) { m_autoSyncArmed = ok; });
   m_watchdog = new QTimer(this);
   m_watchdog->setSingleShot(true);
   connect(m_watchdog, &QTimer::timeout, this, [this]() {
@@ -383,8 +625,133 @@ ZtoryKitsuSync::ZtoryKitsuSync(QObject *parent) : QObject(parent) {
               m_updated += c.updated;
               m_conflicts += c.conflicts;
               m_notSent += c.notSent;
+              // The shots Kitsu has in this episode: step 5's scope.
+              if (m_step == 4)
+                for (const KitsuPullEntry &e : entries)
+                  m_castScope.insert(e.kitsuShotId);
             }
             if (m_step == 4) advance(ok, msg);
+          });
+
+  // Step 5: breakdown, merged on the base, then written where it differs.
+  connect(kc, &KitsuClient::breakdownPulled, this,
+          [this](bool ok, const QVector<KitsuCastingEntry> &entries,
+                 const QString &msg) {
+            if (m_step != 5) return;
+            if (!ok) {
+              advance(false, msg);
+              return;
+            }
+            ZtoryModel *m         = ZtoryModel::instance();
+            const CastingPlan plan = planBreakdown(entries, m_castScope);
+            m_castTaken     = plan.taken;
+            m_castConflicts = plan.conflicts;
+            m_castBases     = plan.bases;
+            m_castProjectId = m->kitsuProjectId();
+            for (const QString &w : breakdownWarnings(plan)) warn(w);
+            m->saveProjectDb();
+            if (plan.pushes.isEmpty()) {
+              advance(true, QString());
+              return;
+            }
+            m_watchdog->start(120000);  // the writes: a second half
+            KitsuClient::instance()->pushCasting(m_castProjectId, plan.pushes);
+          });
+  connect(kc, &KitsuClient::castingProgress, this, [this](int done, int total) {
+    if (m_step != 5) return;
+    m_watchdog->start(120000);  // each answer proves Kitsu is still there
+    emit progress(tr("Sync 5/6 — breakdown %1/%2…").arg(done).arg(total));
+  });
+  // Step 6: asset previews, one after the other.
+  connect(kc, &KitsuClient::reviewPreviewUploaded, this,
+          [this](int token, bool ok, const QString &msg) {
+            if (m_step != 6 || token != m_previewToken) return;
+            m_previewToken = 0;
+            ZtoryModel *m  = ZtoryModel::instance();
+            if (ok) {
+              if (!msg.isEmpty())  // uploaded, but e.g. the cover refused
+                warn(tr("Preview of %1: %2")
+                         .arg(QFileInfo(m_previewJob.file).fileName())
+                         .arg(msg));
+              for (int i = 0; i < (int)m->assets().size(); i++)
+                if (m->assets()[i].uuid == m_previewJob.assetUuid) {
+                  m->setAssetPreviewSig(i, m_previewJob.signature);
+                  m->saveProjectDb();
+                  break;
+                }
+              ++m_previewsSent;
+            } else {
+              ++m_previewsFailed;
+              warn(tr("Preview of an asset not uploaded (%1): %2")
+                       .arg(QFileInfo(m_previewJob.file).fileName())
+                       .arg(msg));
+            }
+            nextAssetPreview();
+          });
+  // A rigged character: the render of its rig became the cover — or there
+  // is none, and its file (the PSD) goes as for any asset.
+  connect(kc, &KitsuClient::taskCoverSet, this,
+          [this](int token, int result, const QString &msg) {
+            if (m_step != 6 || token != m_previewToken) return;
+            m_previewToken = 0;
+            ZtoryModel *m  = ZtoryModel::instance();
+            if (result == KitsuClient::CoverSet) {
+              for (int i = 0; i < (int)m->assets().size(); i++)
+                if (m->assets()[i].uuid == m_previewJob.assetUuid) {
+                  m->setAssetPreviewSig(i, rigCoverSignature(m->assets()[i]));
+                  m->saveProjectDb();
+                  break;
+                }
+              ++m_previewsSent;
+            } else if (result == KitsuClient::CoverFailed) {
+              ++m_previewsFailed;
+              warn(tr("Cover of an asset not set: %1").arg(msg));
+            } else {
+              PreviewJob again = m_previewJob;  // no render: the file, if any
+              again.rigTask.clear();
+              m_previewJobs.prepend(again);
+              ++m_previewTotal;
+            }
+            nextAssetPreview();
+          });
+  // Not a failure: posting would have run a Kitsu automation. No signature
+  // saved — it goes when the task has moved on.
+  connect(kc, &KitsuClient::reviewPreviewSkipped, this,
+          [this](int token, const QString &) {
+            if (m_step != 6 || token != m_previewToken) return;
+            m_previewToken = 0;
+            ++m_previewsSkipped;
+            nextAssetPreview();
+          });
+  connect(kc, &KitsuClient::castingPushed, this,
+          [this](bool ok, const QStringList &written, const QString &msg) {
+            if (m_step != 5) return;
+            ZtoryModel *m = ZtoryModel::instance();
+            // By Kitsu shot id, not by index: the shot list can change while
+            // the writes travel (a scene saved, another project opened).
+            if (m->kitsuProjectId() == m_castProjectId) {
+              for (const QString &shotId : written) {
+                auto it = m_castBases.constFind(shotId);
+                if (it == m_castBases.constEnd()) continue;
+                for (int i = 0; i < (int)m->projectShots().size(); i++)
+                  if (m->projectShots()[i].kitsuShotId == shotId) {
+                    m->setShotBreakdownBase(i, shotId, it.value());
+                    break;
+                  }
+              }
+              m->saveProjectDb();
+            }
+            const int failed = m_castBases.size() - written.size();
+            m_castWritten = written.size();
+            m_castBases.clear();
+            // The last step: a shot that did not go is a warning, not a
+            // stopped Sync — it keeps its old base and goes next time.
+            if (!ok)
+              warn(tr("The breakdown of %1 shot(s) could not be written on "
+                      "Kitsu: %2")
+                       .arg(failed)
+                       .arg(msg));
+            advance(true, QString());
           });
 }
 
@@ -408,6 +775,12 @@ bool ZtoryKitsuSync::start(int handles, QString *why) {
   }
   m_handles = handles;
   m_updated = m_conflicts = m_notSent = 0;
+  m_castTaken = m_castWritten = m_castConflicts = 0;
+  m_castBases.clear();
+  m_castScope.clear();
+  m_previewJobs.clear();
+  m_previewToken = m_previewTotal = m_previewsSent = m_previewsFailed = 0;
+  m_previewsSkipped = 0;
   m_warnings.clear();
   m_step = 0;
   advance(true, QString());
@@ -437,6 +810,7 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
   if (!ok) {
     m_step = -1;
     m_watchdog->stop();
+    m_previewDir.reset();
     emit finished(false, true, tr("Sync stopped: %1").arg(msg));
     showWarnings();
     return;
@@ -445,7 +819,7 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
   KitsuClient *kc = KitsuClient::instance();
   switch (++m_step) {
   case 1: {
-    emit progress(tr("Sync 1/4 — shots to Kitsu…"));
+    emit progress(tr("Sync 1/6 — shots to Kitsu…"));
     int skipped = 0;
     const QVector<KitsuShotPush> shots =
         KitsuClient::buildShotPushFromProject(m_handles, m_pendingTasks,
@@ -456,7 +830,7 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
     return;
   }
   case 2: {
-    emit progress(tr("Sync 2/4 — assets to Kitsu…"));
+    emit progress(tr("Sync 2/6 — assets to Kitsu…"));
     const QVector<KitsuAsset> assets = KitsuClient::buildAssetsFromModel();
     if (assets.isEmpty()) break;
     m_pendingAssetTasks = KitsuClient::buildAssetTasksFromModel();
@@ -464,13 +838,22 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
     return;
   }
   case 3:
-    emit progress(tr("Sync 3/4 — assets from Kitsu…"));
+    emit progress(tr("Sync 3/6 — assets from Kitsu…"));
     kc->pullAssets(m->kitsuProjectId(), m->kitsuEpisodeId());
     return;
   case 4:
-    emit progress(tr("Sync 4/4 — shot statuses from Kitsu…"));
+    emit progress(tr("Sync 4/6 — shot statuses from Kitsu…"));
     kc->pullTeam(m->kitsuProjectId());
     kc->pullStatuses(m->kitsuProjectId(), m->kitsuEpisodeId());
+    return;
+  case 5:
+    emit progress(tr("Sync 5/6 — breakdown…"));
+    kc->pullBreakdown(m->kitsuProjectId(), m->kitsuEpisodeId());
+    return;
+  case 6:
+    queueAssetPreviews();
+    if (m_previewJobs.isEmpty()) break;
+    nextAssetPreview();
     return;
   default: {
     m_step = -1;
@@ -483,10 +866,122 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
     if (m_notSent)
       text += tr("; %1 changed in Ztoryc could not be sent (not on Kitsu yet?)")
                   .arg(m_notSent);
-    emit finished(true, m_conflicts || m_notSent, text + ".");
+    if (m_castTaken || m_castWritten)
+      text += tr("; breakdown: %1 shot(s) updated here, %2 written on Kitsu")
+                  .arg(m_castTaken)
+                  .arg(m_castWritten);
+    if (m_castConflicts)
+      text += tr("; %1 breakdown link(s) changed on both sides, Kitsu's kept")
+                  .arg(m_castConflicts);
+    if (m_previewsSent || m_previewsFailed)
+      text += tr("; %1 asset preview(s) uploaded").arg(m_previewsSent);
+    if (m_previewsFailed)
+      text += tr(", %1 failed").arg(m_previewsFailed);
+    if (m_previewsSkipped)
+      text += tr("; %1 asset preview(s) wait — their task's status starts a "
+                 "Kitsu automation")
+                  .arg(m_previewsSkipped);
+    emit finished(true,
+                  m_conflicts || m_notSent || m_castConflicts ||
+                      m_previewsFailed,
+                  text + ".");
     showWarnings();
     return;
   }
   }
   advance(true, QString());  // a step with nothing to do: the next one
+}
+
+// Step 6. The assets whose preview on Kitsu is missing or older than their
+// file (Franco, 2026-09-27); the task that carries it is the one in progress
+// (see ztoryassetpreview.h for why not the last Done).
+int ZtoryKitsuSync::pendingPreviews() {
+  int n = 0;
+  QHash<QString, QFileInfoList> dirCache;
+  for (const Asset &a : ZtoryModel::instance()->assets()) {
+    if (a.kitsuAssetId.isEmpty()) continue;
+    if (a.previewSig == rigCoverSignature(a)) continue;
+    const ZtoryAssetPreviewSource src = ztoryAssetPreviewSource(a, &dirCache);
+    if (!doneRigTask(a).isEmpty() ||
+        (!src.task.isEmpty() && !src.file.isEmpty() &&
+         src.signature != a.previewSig))
+      ++n;
+  }
+  return n;
+}
+
+void ZtoryKitsuSync::queueAssetPreviews() {
+  m_previewJobs.clear();
+  int nearOnly = 0;
+  QHash<QString, QFileInfoList> dirCache;  // each folder listed once
+  for (const Asset &a : ZtoryModel::instance()->assets()) {
+    if (a.kitsuAssetId.isEmpty()) continue;
+    if (a.previewSig == rigCoverSignature(a)) continue;  // the rig's, set
+    const ZtoryAssetPreviewSource src = ztoryAssetPreviewSource(a, &dirCache);
+    const QString rigTask             = doneRigTask(a);
+    const bool fileToSend = !src.task.isEmpty() && !src.nearNameOnly &&
+                            !src.file.isEmpty() &&
+                            src.signature != a.previewSig;
+    if (src.nearNameOnly && rigTask.isEmpty()) ++nearOnly;
+    if (rigTask.isEmpty() && !fileToSend) continue;
+    m_previewJobs << PreviewJob{a.uuid,
+                                a.kitsuAssetId,
+                                src.task,
+                                src.status,
+                                fileToSend ? src.file : QString(),
+                                src.signature,
+                                rigTask};
+  }
+  m_previewTotal = m_previewJobs.size();
+  if (nearOnly > 0)
+    warn(tr("Asset previews: %1 asset(s) have a file found only by a similar "
+            "name (blue dot) — rename or link it, and the preview follows.")
+             .arg(nearOnly));
+}
+
+void ZtoryKitsuSync::nextAssetPreview() {
+  if (m_step != 6) return;
+  if (m_previewJobs.isEmpty()) {
+    m_previewDir.reset();  // the PNGs were only for the upload
+    advance(true, QString());
+    return;
+  }
+  m_previewJob = m_previewJobs.takeFirst();
+  emit progress(tr("Sync 6/6 — asset previews %1/%2…")
+                    .arg(m_previewTotal - m_previewJobs.size())
+                    .arg(m_previewTotal));
+  if (!m_previewJob.rigTask.isEmpty()) {
+    m_watchdog->start(120000);
+    m_previewToken = KitsuClient::instance()->setCoverFromTaskPreview(
+        1, m_previewJob.kitsuAssetId, m_previewJob.rigTask,
+        tr("Asset preview, from Ztoryc"));
+    return;
+  }
+  if (m_previewJob.file.isEmpty()) {  // no render of the rig, no file
+    QTimer::singleShot(0, this, &ZtoryKitsuSync::nextAssetPreview);
+    return;
+  }
+  if (!m_previewDir) m_previewDir.reset(new QTemporaryDir());
+  // A name per job: an upload of a stopped Sync may still be reading the
+  // file of the same asset.
+  static int jobNumber = 0;
+  const QString png = m_previewDir->filePath(
+      QStringLiteral("%1_%2.png").arg(m_previewJob.assetUuid).arg(++jobNumber));
+  QString why;
+  if (!m_previewDir->isValid() ||
+      !ztoryRenderAssetPreview(m_previewJob.file, png, &why)) {
+    ++m_previewsFailed;
+    warn(tr("Preview of an asset not made: %1").arg(why));
+    // Queued: a run of unreadable files must not nest one call per asset.
+    QTimer::singleShot(0, this, &ZtoryKitsuSync::nextAssetPreview);
+    return;
+  }
+  // Re-armed AFTER the render: a large PSD read on this thread must not
+  // count as Kitsu not answering.
+  m_watchdog->start(120000);
+  // Kitsu wants a status with every comment: the one the task has on Kitsu,
+  // read there (keepServerStatus) — an Approved must stay Approved.
+  m_previewToken = KitsuClient::instance()->uploadReviewPreview(
+      1, m_previewJob.kitsuAssetId, m_previewJob.taskType, png,
+      m_previewJob.status, tr("Asset preview, from Ztoryc"), true);
 }

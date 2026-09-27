@@ -120,6 +120,8 @@
 #include <QFormLayout>
 #include <QFileInfo>
 #include <QDir>
+#include <QDirIterator>
+#include <QCryptographicHash>
 #include "toutputproperties.h"
 #include "toonz/sceneproperties.h"
 #include "toonz/boardsettings.h"
@@ -2685,6 +2687,10 @@ QString StoryboardPanel::ztoryPath() const {
 
 void StoryboardPanel::updateColumnName(int si) {
   if (si < 0 || si >= (int)m_shots.size()) return;
+  // An exported SHOT or a CHARACTER scene is not a storyboard: its sub-scene
+  // columns are characters, not shots. Named after a shot label, SOFIA's
+  // column in sh040 became «sh010» (Franco, 2026-09-27).
+  if (m_currentSceneIsShot || m_currentSceneIsCharacter) return;
   TApp *app = TApp::instance();
   ToonzScene *scene = app->getCurrentScene()->getScene();
   if (!scene) return;
@@ -6512,10 +6518,232 @@ void dumpExportLog(const TFilePath &dir) {
 // the whole track. A trimmed wav with zero offsets survives any target, and
 // the '+'-coded path rides the same capture/copy machinery as the other
 // project-folder assets.
+// The files of a level on disk — one file, or a numbered sequence
+// («sh040..png» is sh040.0001.png, sh040.0002.png…) — as one fingerprint of
+// their names and contents. Two levels with the same fingerprint are the same
+// drawings; dates are no use here, a copy does not keep them.
+static QByteArray levelFingerprint(const TFilePath &level) {
+  const QFileInfo fi(level.getQString());
+  QStringList files;
+  if (fi.exists() && fi.isFile())
+    files << fi.absoluteFilePath();
+  else {
+    const QString name = QString::fromStdWString(level.getWideName());
+    const QString ext  = QString::fromStdString(level.getType());
+    QDir dir(fi.absolutePath());
+    for (const QString &f :
+         dir.entryList(QStringList() << name + ".*." + ext, QDir::Files,
+                       QDir::Name))
+      files << dir.absoluteFilePath(f);
+  }
+  QCryptographicHash hash(QCryptographicHash::Md5);
+  for (const QString &f : files) {
+    hash.addData(QFileInfo(f).fileName().toUtf8());
+    QFile in(f);
+    if (in.open(QIODevice::ReadOnly)) hash.addData(&in);
+  }
+  return files.isEmpty() ? QByteArray() : hash.result();
+}
+
+// The file on disk behind a level path. A PSD layer level is written
+// «bg#7#group.psd» and lives in «bg.psd» (as TSystem::doesExistFileOrLevel
+// reads it); anything else is its own path.
+static TFilePath physicalFile(const TFilePath &level) {
+  if (level.getType() != "psd") return level;
+  const std::wstring name = level.getWideName();
+  const std::wstring::size_type hash = name.find(L'#');
+  if (hash == std::wstring::npos) return level;
+  return level.getParentDir() + TFilePath(name.substr(0, hash) + L".psd");
+}
+
+// Copies `src` to `dst` unless an identical copy is there already; a copy
+// that DIFFERS is replaced. For what the storyboard is the source of.
+// Returns false only if the copy was needed and failed.
+static bool copyUnlessSame(const TFilePath &dst, const TFilePath &src,
+                           const QString &baseName) {
+  const QString shown = QString::fromStdWString(dst.getWideName());
+  if (TSystem::doesExistFileOrLevel(dst)) {
+    if (levelFingerprint(dst) == levelFingerprint(src)) return true;
+    exportLog(QString("[%1] shot folder: %2 differs from the storyboard's — "
+                      "replaced")
+                  .arg(baseName, shown));
+    try {
+      TSystem::removeFileOrLevel(dst);
+    } catch (...) {
+    }
+  }
+  try {
+    TSystem::touchParentDir(dst);
+    TXshSimpleLevel::copyFiles(dst, src);
+    if (!TSystem::doesExistFileOrLevel(dst)) TSystem::copyFile(dst, src);
+  } catch (...) {
+  }
+  return TSystem::doesExistFileOrLevel(dst);
+}
+
+// Makes the exported shot carry its own files (Franco, 2026-09-27: a shot is
+// sent alone to an outside animator). Its levels were drawn in the
+// storyboard, so with «use scene path» their files sit in the STORYBOARD's
+// folder, +extras/<storyboard>/sh040..png, and the saved shot pointed there.
+//
+// BEFORE the save: each such file is copied into the shot's own folder
+// (+extras/sh040/…) and the level is pointed there; the caller saves and then
+// puts the returned original paths back — the sub-scene is the storyboard's,
+// which must keep its own files. It is the pattern of Tahoma's own
+// sub-xsheet save (iocommand.cpp, orgLevelPaths / revertOrgLevelPaths), and
+// Tahoma writes the paths: an earlier version rewrote the saved .tnz as text,
+// with '/' separators — on Windows nothing matched (review, 2026-09-27).
+//
+// A copy already in the shot's folder that DIFFERS is replaced: the
+// storyboard is the source of these drawings, and a redrawn panel must reach
+// the shot on the next export (Franco, 2026-09-27). Imported assets are
+// another matter: those keep an existing copy.
+//
+// `shotScene`: where the shot WILL live — for the export to a new project, its
+// place in the project, not the staging folder it is saved in first.
+static QList<QPair<TXshLevel *, TFilePath>> relocateIntoShotFolder(
+    ToonzScene *scene, TXsheet *childXsh, const TFilePath &shotScene,
+    const QString &baseName) {
+  QList<QPair<TXshLevel *, TFilePath>> original;
+  std::shared_ptr<TProject> project = scene->getProject();
+  if (!project || !childXsh) return original;
+  ToonzScene shot;
+  shot.setProject(project);
+  shot.setScenePath(shotScene);
+  const TFilePath sbSave   = scene->getSavePath();
+  const TFilePath shotSave = shot.getSavePath();
+  if (sbSave == shotSave) return original;
+
+  std::set<TXshLevel *> used;
+  childXsh->getUsedLevels(used);
+  for (TXshLevel *lv : used) {
+    TXshSimpleLevel *sl = lv ? lv->getSimpleLevel() : nullptr;
+    TXshSoundLevel *snd = lv ? lv->getSoundLevel() : nullptr;
+    if (!sl && !snd) continue;
+    const TFilePath coded = sl ? sl->getPath() : snd->getPath();
+    if (coded.isEmpty() || coded.getWideString()[0] != L'+') continue;
+    std::wstring head;
+    TFilePath tail;
+    coded.split(head, tail);  // «+extras», «sb/sh040..png»
+    const std::string folder = ::to_string(head.substr(1));
+    if (!project->getUseScenePath(folder)) continue;
+    const TFilePath sbBase   = TFilePath(head) + sbSave;
+    const TFilePath shotBase = TFilePath(head) + shotSave;
+    // Already in the shot's folder (it may sit INSIDE the storyboard's, for a
+    // storyboard in a sub-folder of scenes/): nothing to do.
+    if (shotBase.isAncestorOf(coded) || !sbBase.isAncestorOf(coded)) continue;
+    const TFilePath newCoded = shotBase + (coded - sbBase);
+
+    const TFilePath srcAbs = scene->decodeFilePath(coded);
+    const TFilePath dstAbs = shot.decodeFilePath(newCoded);
+    if (!copyUnlessSame(physicalFile(dstAbs), physicalFile(srcAbs), baseName)) {
+      exportLog(QString("[%1] shot folder: %2 NOT copied — the shot keeps "
+                        "pointing at the storyboard's")
+                    .arg(baseName, coded.getQString()));
+      continue;
+    }
+    // A PSD layer's mouth map travels with it (ztorymouthmap.h: beside the
+    // level, same name, «.zmouth»).
+    const TFilePath srcMap = srcAbs.withType("zmouth");
+    if (sl && TFileStatus(srcMap).doesExist())
+      copyUnlessSame(dstAbs.withType("zmouth"), srcMap, baseName);
+
+    original.append(qMakePair(lv, coded));
+    if (sl)
+      sl->setPath(newCoded, true);  // keep the frames: same drawings
+    else
+      snd->setPath(newCoded);
+  }
+  if (!original.isEmpty())
+    exportLog(QString("[%1] shot folder: %2 level(s) pointed at the shot's own "
+                      "folder")
+                  .arg(baseName)
+                  .arg(original.size()));
+  return original;
+}
+
+// The mouth maps of the ASSETS imported into the shot. The import copies a
+// character's PSD into the shot's folder but knows nothing of the .zmouth
+// beside it: inside the project Ztoryc finds a map by name anywhere, a shot
+// sent alone would arrive without. For every PSD level of the shot in its own
+// folder, a missing map is looked up by name in the project — `index`, built
+// once for the whole export — and copied beside it.
+static void copyMouthMapsIntoShot(ToonzScene *scene, TXsheet *childXsh,
+                                  const TFilePath &shotScene,
+                                  const QString &baseName,
+                                  QHash<QString, TFilePath> *index,
+                                  bool *indexBuilt) {
+  std::shared_ptr<TProject> project = scene->getProject();
+  if (!project || !childXsh) return;
+  ToonzScene shot;
+  shot.setProject(project);
+  shot.setScenePath(shotScene);
+  const TFilePath shotSave = shot.getSavePath();
+  std::set<TXshLevel *> used;
+  childXsh->getUsedLevels(used);
+  int copied = 0;
+  for (TXshLevel *lv : used) {
+    TXshSimpleLevel *sl = lv ? lv->getSimpleLevel() : nullptr;
+    if (!sl || sl->getPath().getType() != "psd") continue;
+    const TFilePath coded = sl->getPath();
+    std::wstring head;
+    TFilePath tail;
+    coded.split(head, tail);
+    if (head.empty() || head[0] != L'+' ||
+        !(TFilePath(head) + shotSave).isAncestorOf(coded))
+      continue;
+    const TFilePath mapAbs = shot.decodeFilePath(coded).withType("zmouth");
+    if (TFileStatus(mapAbs).doesExist()) continue;
+    if (!*indexBuilt) {
+      *indexBuilt = true;
+      for (const char *alias : {"+extras", "+drawings", "+scenes"}) {
+        const QString root = scene->decodeFilePath(TFilePath(alias)).getQString();
+        if (root.isEmpty() || !QDir(root).exists()) continue;
+        QDirIterator di(root, QStringList() << "*.zmouth", QDir::Files,
+                        QDirIterator::Subdirectories);
+        while (di.hasNext()) {
+          const QString p = di.next();
+          const QString name = QFileInfo(p).fileName();
+          if (!index->contains(name))
+            index->insert(name, TFilePath(p.toStdWString()));
+        }
+      }
+    }
+    const QString name =
+        QString::fromStdWString(mapAbs.getWideName()) + ".zmouth";
+    auto it = index->constFind(name);
+    if (it == index->constEnd()) continue;  // this layer has no mouths
+    try {
+      TSystem::copyFile(mapAbs, it.value());
+      copied++;
+    } catch (...) {
+      exportLog(QString("[%1] mouth map NOT copied: %2")
+                    .arg(baseName, mapAbs.getQString()));
+    }
+  }
+  if (copied > 0)
+    exportLog(QString("[%1] shot folder: %2 mouth map(s) copied beside their "
+                      "PSD")
+                  .arg(baseName)
+                  .arg(copied));
+}
+
 static QList<int> injectAudioForShot(ToonzScene *scene, TXsheet *mainXsh,
                                      TXsheet *childXsh, int shotR0, int shotR1,
                                      double fps, const QString &baseName,
+                                     const TFilePath &shotScenePath,
                                      QList<TXshLevel *> &injectedLevels) {
+  // The wavs go where the project puts the SHOT's extras, like its PNGs:
+  // +extras/<shot>/ with «use scene path» (Franco, 2026-09-27: a shot sent
+  // alone to an animator must carry its own audio). They were written in
+  // +extras/ itself, shared by nobody and found by no one.
+  TFilePath extrasDir("+extras");
+  if (scene->getProject() && scene->getProject()->getUseScenePath("extras")) {
+    ToonzScene shot;
+    shot.setProject(scene->getProject());
+    shot.setScenePath(shotScenePath);
+    extrasDir = extrasDir + shot.getSavePath();
+  }
   QList<int> injected;
   int audioIdx = 0;
   // Incoming cross-dissolve: the sub-scene carries headHalf hold copies at
@@ -6550,8 +6778,7 @@ static QList<int> injectAudioForShot(ToonzScene *scene, TXsheet *mainXsh,
     QString wavName = baseName + "_audio" +
                       (audioIdx > 1 ? QString::number(audioIdx) : QString()) +
                       ".wav";
-    TFilePath codedWav =
-        TFilePath("+extras") + TFilePath(wavName.toStdWString());
+    TFilePath codedWav = extrasDir + TFilePath(wavName.toStdWString());
     TFilePath absWav = scene->decodeFilePath(codedWav);
     try {
       TSystem::touchParentDir(absWav);
@@ -6668,7 +6895,17 @@ static void addAssetImportOption(QCheckBox *chk) {
 // gli asset che non si risolvono possono essere decine, e nascosti dietro a
 // «mostra dettagli» non li guarda nessuno.
 static bool ztoryConfirmShotAssets(QWidget *parent, const QStringList &uuids) {
-  const QVector<ZtoryAssetCheck> checks = ztoryCheckShotAssets(uuids);
+  // The check loads every PSD layer by layer (the first time): seconds. A
+  // guard, so an exception does not leave the cursor spinning.
+  struct WaitCursor {
+    WaitCursor() { QApplication::setOverrideCursor(Qt::WaitCursor); }
+    ~WaitCursor() { QApplication::restoreOverrideCursor(); }
+  };
+  QVector<ZtoryAssetCheck> checks;
+  {
+    WaitCursor wait;
+    checks = ztoryCheckShotAssets(uuids);
+  }
   // Gli shot guardati, come li conosce il tracker. Servono nel messaggio del
   // caso vuoto: un progetto ha piu' storyboard, ognuno con il suo SH010, e
   // vedere quali shot sono stati controllati e' l'unico modo per accorgersi
@@ -6722,10 +6959,16 @@ static bool ztoryConfirmShotAssets(QWidget *parent, const QStringList &uuids) {
   dlg.setWindowTitle(QObject::tr("Assets from the Breakdown"));
   dlg.setMinimumSize(560, 380);
   auto *lay = new QVBoxLayout(&dlg);
+  // Nothing missing, only defects (damaged PSD layers): said as such.
   auto *head = new QLabel(
-      QObject::tr("%1 of the %2 assets these shots need cannot be resolved:")
-          .arg(missing)
-          .arg(checks.size()),
+      missing > 0
+          ? QObject::tr("%1 of the %2 assets these shots need cannot be "
+                        "resolved:")
+                .arg(missing)
+                .arg(checks.size())
+          : QObject::tr("All the %1 assets resolve, but some come in with a "
+                        "defect:")
+                .arg(checks.size()),
       &dlg);
   head->setWordWrap(true);
   lay->addWidget(head);
@@ -7114,6 +7357,11 @@ QList<TFilePath> StoryboardPanel::exportShotScenesToDir(
 
   (void)version;  // exported .tnz name uses the shot convention, not a version
 
+  // The project's mouth maps by file name: scanned once for the whole export,
+  // not once per shot (copyMouthMapsIntoShot).
+  QHash<QString, TFilePath> mouthMapIndex;
+  bool mouthMapIndexBuilt = false;
+
   for (int i : indices) {
     if (i < 0 || i >= (int)m_shots.size()) { fail++; continue; }
     const ShotData &sd = m_shots[i].data;
@@ -7130,6 +7378,16 @@ QList<TFilePath> StoryboardPanel::exportShotScenesToDir(
     QString baseName = seqLbl.isEmpty() ? shotLbl : (seqLbl + "_" + shotLbl);
     if (baseName.isEmpty()) baseName = "shot_" + sd.label();
     TFilePath outPath = outDirFp + TFilePath(baseName.toStdString() + ".tnz");
+    // Where the shot WILL live, which names its folder (+extras/<shot>/).
+    // The export to a new project saves first into a staging folder
+    // (+scenes/ztoryc_export_tmp/scenes/): named after that, the copies went
+    // to +extras/ztoryc_export_tmp/… of the SOURCE project, outside what the
+    // staging cleanup removes, and the delivered project carried that folder
+    // in its paths (review, 2026-09-27).
+    const TFilePath shotScene =
+        assetCopies ? scene->decodeFilePath(TFilePath("+scenes")) +
+                          TFilePath(baseName.toStdString() + ".tnz")
+                    : outPath;
 
     int shotCol = sd.xsheetColumn;
     int shotR0 = 0, shotR1 = 0;
@@ -7160,7 +7418,8 @@ QList<TFilePath> StoryboardPanel::exportShotScenesToDir(
     QList<TXshLevel *> injectedLevels;
     if (mainXsh && childXsh && shotR1 >= shotR0)
       injectedCols = injectAudioForShot(scene, mainXsh, childXsh, shotR0,
-                                        shotR1, fps, baseName, injectedLevels);
+                                        shotR1, fps, baseName, shotScene,
+                                        injectedLevels);
 
     // ── Gli asset del breakdown, dentro lo shot ─────────────────────────────
     // Lo shot esportato nasce gia' popolato: i personaggi come sotto-scene, il
@@ -7170,7 +7429,7 @@ QList<TFilePath> StoryboardPanel::exportShotScenesToDir(
     ZtoryImportedAssets imported;
     int undoBefore = TUndoManager::manager()->getHistoryCount();
     if (opts.importAssets && childXsh && !sd.uuid.isEmpty()) {
-      imported = ztoryImportShotAssets(sd.uuid, childXsh);
+      imported = ztoryImportShotAssets(sd.uuid, childXsh, shotScene);
       for (const QString &line : imported.log)
         exportLog(QString("[%1] asset %2").arg(baseName, line));
     }
@@ -7261,7 +7520,15 @@ QList<TFilePath> StoryboardPanel::exportShotScenesToDir(
       }
     }
 
+    // The shot's own folder: its files copied there and its levels pointed
+    // there for the save — then pointed back, below.
+    const QList<QPair<TXshLevel *, TFilePath>> relocated =
+        relocateIntoShotFolder(scene, childXsh, shotScene, baseName);
+    copyMouthMapsIntoShot(scene, childXsh, shotScene, baseName, &mouthMapIndex,
+                          &mouthMapIndexBuilt);
+
     bool saved = IoCmd::saveScene(outPath, IoCmd::SAVE_SUBXSHEET);
+
 
     // After save, copy each captured source to the level's FINAL resolved
     // location. Reading the post-save path aligns with whatever relocation the
@@ -7313,6 +7580,14 @@ QList<TFilePath> StoryboardPanel::exportShotScenesToDir(
           list.append(qMakePair(finalCoded, pr.second));
       }
       if (assetCopies && !list.isEmpty()) assetCopies->insert(baseName, list);
+    }
+    // Back to the storyboard's own files, now that the saved paths have been
+    // read: the sub-scene is the storyboard's.
+    for (const auto &r : relocated) {
+      if (TXshSimpleLevel *sl = r.first->getSimpleLevel())
+        sl->setPath(r.second, true);
+      else if (TXshSoundLevel *snd = r.first->getSoundLevel())
+        snd->setPath(r.second);
     }
 
     // Si tolgono a ritroso rispetto a come sono state aggiunte — lip sync,

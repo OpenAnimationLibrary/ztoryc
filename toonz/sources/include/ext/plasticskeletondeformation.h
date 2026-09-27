@@ -292,7 +292,7 @@ typedef struct PlasticSkeletonDeformationKeyframe {
   never by vertex index: that is what lets an action be copied to a skeleton
   whose internal vertex numbering differs.
 */
-struct PoseAction {
+struct DVAPI PoseAction {
   QString m_name;  //!< Action name, unique within the deformation
 
   //! How the action is stamped. Three modes, and the difference that matters is
@@ -393,7 +393,7 @@ ote No self-loop: the delta touches only the mesh, never the joint ANGLE
   that drives it, and weight() reads the joint's BASE angle. Same rule that
   keeps pins from oscillating.
 */
-struct MeshCorrective {
+struct DVAPI MeshCorrective {
   QString m_name;              //!< Unique within the deformation
   QString m_driverVertexName;  //!< Skeleton vertex whose ANGLE drives the fade
   double m_restAngle = 0.0;    //!< Angle at which the corrective is off (0)

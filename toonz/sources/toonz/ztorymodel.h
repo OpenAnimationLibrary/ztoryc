@@ -251,6 +251,10 @@ struct Asset {
   // one — the books already painted in the library background. Nothing is
   // looked for or deduced, and the export does not report it as missing.
   bool noFile = false;
+  // The file whose picture is the asset's preview on Kitsu, as it was when
+  // uploaded (path, size, time, Kitsu id — ztoryAssetPreviewSource): the
+  // Sync uploads again only when it changes (Franco, 2026-09-27).
+  QString previewSig;
 };
 
 // A project-level shot record. Owns the production progress (task status/
@@ -265,6 +269,11 @@ struct BreakdownEntry {
   QString assetUuid;
   int     nbOccurrences = 1;  // same asset appearing more than once in the shot
   QString label;              // Kitsu's free label (seen in the wild: "animate")
+  bool operator==(const BreakdownEntry &o) const {
+    return assetUuid == o.assetUuid && nbOccurrences == o.nbOccurrences &&
+           label == o.label;
+  }
+  bool operator!=(const BreakdownEntry &o) const { return !(*this == o); }
 };
 
 struct ProjectShot {
@@ -277,6 +286,18 @@ struct ProjectShot {
   QString kitsuShotId;  // Kitsu shot id once synced — keeps the link across renames
   QMap<QString, TaskState> tasks;  // progress — authoritative for the project DB
   QVector<BreakdownEntry>  breakdown;  // assets this shot needs
+  // The breakdown Kitsu had at the last sync — the «base» of the three-way
+  // merge (ZtoryKitsuSync), as TaskState::synced is for statuses. Without it
+  // a link missing on one side cannot be told apart: added on the other, or
+  // removed here? Only assets linked to Kitsu. hasBreakdownBase false = never
+  // synced (the first Sync joins both sides and removes nothing).
+  // breakdownBaseShotId: the Kitsu shot the base was taken on. A shot
+  // re-created on Kitsu gets a new id and an empty casting; judged against
+  // the old base, that emptiness would read as «every link removed on
+  // Kitsu» and empty the breakdown here (review 2026-09-27, B1).
+  bool                     hasBreakdownBase = false;
+  QString                  breakdownBaseShotId;
+  QVector<BreakdownEntry>  breakdownBase;
 };
 
 // ─── Animatic export burn-in ──────────────────────────────────────────────────
@@ -331,6 +352,9 @@ class ZtoryModel : public QObject {
   std::vector<ShotData>             m_shots;
   ZtoryTaskEvents                  *m_taskEvents = new ZtoryTaskEvents(this);
   std::vector<Asset>                m_assets;       // project-level asset list
+  // Ztoryc: the PSD load test (ztoryCheckPsd) by «path|size|time». A PSD is
+  // read layer by layer once, not at every export.
+  QHash<QString, QPair<QString, QString>> m_psdChecks;  // problem, note
   std::vector<ProjectShot>          m_projectShots; // all project shots (from production.ztrack)
   QVector<QString>                  m_storyboardFiles; // registered storyboard basenames
   std::vector<SequenceData>         m_sequences;
@@ -608,6 +632,9 @@ public:
   void setAssetNoFile(int i, bool on) {
     if (i >= 0 && i < (int)m_assets.size()) m_assets[i].noFile = on;
   }
+  void setAssetPreviewSig(int i, const QString &sig) {
+    if (i >= 0 && i < (int)m_assets.size()) m_assets[i].previewSig = sig;
+  }
   // Il percorso assoluto del PSD da riggare, o vuoto.
   QString resolveAssetRigPsd(const Asset &a) const;
   QString productionType()  const { return m_productionType; }
@@ -682,6 +709,14 @@ public:
   void setShotBreakdown(int i, const QVector<BreakdownEntry> &b) {
     if (i >= 0 && i < (int)m_projectShots.size())
       m_projectShots[i].breakdown = b;
+  }
+  void setShotBreakdownBase(int i, const QString &kitsuShotId,
+                            const QVector<BreakdownEntry> &b) {
+    if (i < 0 || i >= (int)m_projectShots.size() || kitsuShotId.isEmpty())
+      return;
+    m_projectShots[i].hasBreakdownBase    = true;
+    m_projectShots[i].breakdownBaseShotId = kitsuShotId;
+    m_projectShots[i].breakdownBase       = b;
   }
   // Cumulative frame ranges [in,out] (1-based) for each project shot, in
   // m_projectShots order, reset at every source storyboard change. Maps onto
@@ -771,6 +806,18 @@ public:
 
   // ── Assets (project-level) ─────────────────────────────────────────────────
   const std::vector<Asset> &assets() const { return m_assets; }
+  bool psdCheckCached(const QString &key, QString *problem,
+                      QString *note) const {
+    auto it = m_psdChecks.constFind(key);
+    if (it == m_psdChecks.constEnd()) return false;
+    *problem = it.value().first;
+    *note    = it.value().second;
+    return true;
+  }
+  void setPsdCheck(const QString &key, const QString &problem,
+                   const QString &note) {
+    m_psdChecks.insert(key, qMakePair(problem, note));
+  }
   std::vector<Asset>       &assets()       { return m_assets; }
   int  assetCount() const { return (int)m_assets.size(); }
   void addAsset(const QString &type, const QString &name);  // assigns a uuid; emits

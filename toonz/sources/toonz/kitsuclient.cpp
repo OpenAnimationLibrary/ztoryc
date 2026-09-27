@@ -18,6 +18,8 @@
 #include <QDir>
 #include <QMimeDatabase>
 #include <algorithm>
+#include <functional>
+#include <memory>
 
 namespace {
 const char *kGroupBaseUrl  = "Ztoryc/Kitsu/BaseUrl";
@@ -269,6 +271,7 @@ void KitsuClient::onLoginReply(QNetworkReply *reply) {
   m_accessToken       = o.value("access_token").toString();
   m_refreshToken      = o.value("refresh_token").toString();
   m_trCachesLoaded    = false;  // a new login may be on another server
+  m_revAutomationsProject.clear();
 
   if (m_accessToken.isEmpty()) {
     m_syncAfterLogin = false;
@@ -1738,6 +1741,67 @@ void KitsuClient::pullBreakdown(const QString &projectId,
   });
 }
 
+void KitsuClient::pushCasting(const QString &projectId,
+                              const QVector<KitsuCastingPush> &shots) {
+  if (!isLoggedIn() || projectId.isEmpty()) {
+    emit castingPushed(false, {}, tr("Not connected to a Kitsu project."));
+    return;
+  }
+  // One shot at a time, chained on the replies: the state travels with the
+  // chain instead of living in members that a second push would overwrite.
+  struct Chain {
+    QString                   projectId;
+    QVector<KitsuCastingPush> shots;
+    int                       next = 0;
+    QStringList               written;
+    QString                   firstError;
+  };
+  auto chain       = std::make_shared<Chain>();
+  chain->projectId = projectId;
+  chain->shots     = shots;
+  auto step        = std::make_shared<std::function<void()>>();
+  // The lambda holds only a weak reference to itself: a strong one would be
+  // a cycle, and the chain would never be freed.
+  std::weak_ptr<std::function<void()>> weakStep = step;
+  *step = [this, chain, weakStep]() {
+    if (chain->next >= chain->shots.size()) {
+      emit castingPushed(chain->firstError.isEmpty(), chain->written,
+                         chain->firstError.isEmpty()
+                             ? tr("Breakdown written for %1 shot(s).")
+                                   .arg(chain->written.size())
+                             : chain->firstError);
+      return;
+    }
+    const KitsuCastingPush &sh = chain->shots.at(chain->next++);
+    // Zou reads a bare JSON array, and spells it «nb_occurences».
+    QJsonArray body;
+    for (const KitsuCastingEntry &e : sh.entries) {
+      QJsonObject o;
+      o["asset_id"]      = e.kitsuAssetId;
+      o["nb_occurences"] = e.nbOccurrences;
+      o["label"]         = e.label;
+      body.append(o);
+    }
+    QNetworkReply *r = authPut("/api/data/projects/" + chain->projectId +
+                                   "/entities/" + sh.kitsuShotId + "/casting",
+                               QJsonDocument(body).toJson(QJsonDocument::Compact));
+    const QString shotId = sh.kitsuShotId;
+    auto self = weakStep.lock();
+    connect(r, &QNetworkReply::finished, this,
+            [this, r, chain, shotId, self]() {
+      r->deleteLater();
+      const QByteArray b = r->readAll();
+      if (r->error() == QNetworkReply::NoError)
+        chain->written << shotId;
+      else if (chain->firstError.isEmpty())
+        chain->firstError = errorMessage(r, b);
+      emit castingProgress(chain->next, chain->shots.size());
+      (*self)();
+    });
+  };
+  (*step)();
+}
+
 bool KitsuClient::episodeScoped(const QJsonObject &entity) const {
   // No episode bound (or not a tvshow): everything belongs here, as before.
   if (m_entityEpisodeId.isEmpty()) return true;
@@ -2716,21 +2780,24 @@ void KitsuClient::trFinish(TransitionResult r, TaskStatus server,
 int KitsuClient::uploadReviewPreview(int entity, const QString &kitsuEntityId,
                                      const QString &taskType,
                                      const QString &filePath,
-                                     TaskStatus status) {
+                                     TaskStatus status,
+                                     const QString &comment,
+                                     bool keepServerStatus) {
   const int token = ++m_revToken;
   auto fail = [this, token](const QString &msg) {
     emit reviewPreviewUploaded(token, false, msg);
   };
   // The steps, once the caches are there.
   auto run = [this, token, fail, entity, kitsuEntityId, taskType, filePath,
-              status]() {
-    const QString ttId     = m_trTaskTypeId.value(trTypeKey(entity, taskType));
-    const QString statusId = m_trStatusIdByZ.value(static_cast<int>(status));
+              status, comment, keepServerStatus]() {
+    const QString ttId = m_trTaskTypeId.value(trTypeKey(entity, taskType));
+    const QString wantedStatusId =
+        m_trStatusIdByZ.value(static_cast<int>(status));
     if (ttId.isEmpty()) {
       fail(tr("Task type «%1» is not on Kitsu.").arg(taskType));
       return;
     }
-    if (statusId.isEmpty()) {
+    if (!keepServerStatus && wantedStatusId.isEmpty()) {
       fail(tr("Kitsu has no matching status."));
       return;
     }
@@ -2747,10 +2814,24 @@ int KitsuClient::uploadReviewPreview(int entity, const QString &kitsuEntityId,
         fail(tr("No «%1» task on Kitsu.").arg(taskType));
         return;
       }
-      const QString taskId = arr.first().toObject().value("id").toString();
+      const QJsonObject task = arr.first().toObject();
+      const QString taskId   = task.value("id").toString();
+      const QString statusId = keepServerStatus
+                                   ? task.value("task_status_id").toString()
+                                   : wantedStatusId;
+      if (keepServerStatus &&
+          m_revAutomations.contains(ttId + "|" + statusId)) {
+        emit reviewPreviewSkipped(
+            token, tr("«%1» is in a status that starts one of the project's "
+                      "automations on Kitsu: a comment would run it again")
+                       .arg(taskType));
+        return;
+      }
       QJsonObject body;
       body["task_status_id"] = statusId;
-      body["comment"]        = tr("Preview for approval, from Ztoryc");
+      body["comment"] = comment.isEmpty()
+                            ? tr("Preview for approval, from Ztoryc")
+                            : comment;
       QNetworkReply *c = authPost("/api/actions/tasks/" + taskId + "/comment",
                                   QJsonDocument(body).toJson(QJsonDocument::Compact));
       armTimeout(c);
@@ -2782,14 +2863,24 @@ int KitsuClient::uploadReviewPreview(int entity, const QString &kitsuEntityId,
             f->deleteLater();
             const QByteArray fb = f->readAll();
             if (f->error() != QNetworkReply::NoError) { fail(errorMessage(f, fb)); return; }
-            // The asset's cover shows the latest rig; best effort.
-            QJsonObject mb;
-            mb["frame_number"] = 0;
+            // The preview becomes the entity's cover. NO frame_number: Zou
+            // accepts it only for a movie, and answered 400 to every
+            // picture — no cover was ever set this way (2026-09-27).
             QNetworkReply *mp = authPut(
                 "/api/actions/preview-files/" + pid + "/set-main-preview",
-                QJsonDocument(mb).toJson(QJsonDocument::Compact));
-            connect(mp, &QNetworkReply::finished, mp, &QObject::deleteLater);
-            emit reviewPreviewUploaded(token, true, QString());
+                QByteArray("{}"));
+            armTimeout(mp);
+            connect(mp, &QNetworkReply::finished, this, [=]() {
+              mp->deleteLater();
+              const QByteArray mpb = mp->readAll();
+              // The preview is there either way: ok, and the message says
+              // what did not go.
+              emit reviewPreviewUploaded(
+                  token, true,
+                  mp->error() == QNetworkReply::NoError
+                      ? QString()
+                      : tr("cover not set: %1").arg(errorMessage(mp, mpb)));
+            });
           });
         });
       });
@@ -2799,11 +2890,151 @@ int KitsuClient::uploadReviewPreview(int entity, const QString &kitsuEntityId,
     QMetaObject::invokeMethod(
         this, [fail]() { fail(tr("Not logged in to Kitsu.")); },
         Qt::QueuedConnection);
-  } else if (m_trCachesLoaded) {
-    QMetaObject::invokeMethod(this, run, Qt::QueuedConnection);
   } else {
-    trLoadCaches(run, fail);
+    // The automations only matter when the status is kept; they are read
+    // after the caches, which a new login clears.
+    auto withAutomations = [this, run, fail, keepServerStatus]() {
+      const QString pid = ZtoryModel::instance()->kitsuProjectId();
+      if (!keepServerStatus || m_revAutomationsProject == pid)
+        run();
+      else
+        revLoadAutomations(run, fail);
+    };
+    if (m_trCachesLoaded)
+      QMetaObject::invokeMethod(this, withAutomations, Qt::QueuedConnection);
+    else
+      trLoadCaches(withAutomations, fail);
   }
   return token;
+}
+
+int KitsuClient::setCoverFromTaskPreview(int entity,
+                                         const QString &kitsuEntityId,
+                                         const QString &taskType,
+                                         const QString &skipText) {
+  const int token = ++m_revToken;
+  auto answer     = [this, token](int result, const QString &msg) {
+    emit taskCoverSet(token, result, msg);
+  };
+  auto run = [this, answer, entity, kitsuEntityId, taskType, skipText]() {
+    const QString ttId = m_trTaskTypeId.value(trTypeKey(entity, taskType));
+    if (ttId.isEmpty()) {
+      answer(CoverNoPreview, QString());
+      return;
+    }
+    QNetworkReply *r = m_nam->get(authGet("/api/data/tasks?entity_id=" +
+                                          kitsuEntityId + "&task_type_id=" +
+                                          ttId));
+    armTimeout(r);
+    connect(r, &QNetworkReply::finished, this, [=]() {
+      r->deleteLater();
+      const QByteArray b = r->readAll();
+      if (r->error() != QNetworkReply::NoError) {
+        answer(CoverFailed, errorMessage(r, b));
+        return;
+      }
+      const QJsonArray arr = QJsonDocument::fromJson(b).array();
+      if (arr.isEmpty()) {
+        answer(CoverNoPreview, QString());
+        return;
+      }
+      const QString taskId = arr.first().toObject().value("id").toString();
+      QNetworkReply *c =
+          m_nam->get(authGet("/api/data/tasks/" + taskId + "/comments"));
+      armTimeout(c);
+      connect(c, &QNetworkReply::finished, this, [=]() {
+        c->deleteLater();
+        const QByteArray cb = c->readAll();
+        if (c->error() != QNetworkReply::NoError) {
+          answer(CoverFailed, errorMessage(c, cb));
+          return;
+        }
+        // The newest comment with a picture that is not ours. Sorted here:
+        // the order of the answer is Zou's business.
+        QString bestPreview, bestTime;
+        for (const QJsonValue &v : QJsonDocument::fromJson(cb).array()) {
+          const QJsonObject o = v.toObject();
+          if (o.value("text").toString() == skipText) continue;
+          const QJsonArray previews = o.value("previews").toArray();
+          if (previews.isEmpty()) continue;
+          const QString when = o.value("created_at").toString();
+          if (!bestTime.isEmpty() && when <= bestTime) continue;
+          const QJsonValue p = previews.last();
+          bestPreview = p.isObject() ? p.toObject().value("id").toString()
+                                     : p.toString();
+          bestTime    = when;
+        }
+        if (bestPreview.isEmpty()) {
+          answer(CoverNoPreview, QString());
+          return;
+        }
+        QNetworkReply *mp = authPut(
+            "/api/actions/preview-files/" + bestPreview + "/set-main-preview",
+            QByteArray("{}"));
+        armTimeout(mp);
+        connect(mp, &QNetworkReply::finished, this, [=]() {
+          mp->deleteLater();
+          const QByteArray mpb = mp->readAll();
+          if (mp->error() != QNetworkReply::NoError)
+            answer(CoverFailed, errorMessage(mp, mpb));
+          else
+            answer(CoverSet, QString());
+        });
+      });
+    });
+  };
+  auto fail = [answer](const QString &msg) { answer(CoverFailed, msg); };
+  if (!isLoggedIn())
+    QMetaObject::invokeMethod(
+        this, [fail]() { fail(tr("Not logged in to Kitsu.")); },
+        Qt::QueuedConnection);
+  else if (m_trCachesLoaded)
+    QMetaObject::invokeMethod(this, run, Qt::QueuedConnection);
+  else
+    trLoadCaches(run, fail);
+  return token;
+}
+
+void KitsuClient::revLoadAutomations(
+    std::function<void()> onDone,
+    std::function<void(const QString &)> onFail) {
+  const QString pid = ZtoryModel::instance()->kitsuProjectId();
+  QNetworkReply *r  = m_nam->get(authGet("/api/data/projects/" + pid));
+  armTimeout(r);
+  connect(r, &QNetworkReply::finished, this, [this, r, pid, onDone, onFail]() {
+    r->deleteLater();
+    const QByteArray b = r->readAll();
+    if (r->error() != QNetworkReply::NoError) {
+      onFail(errorMessage(r, b));
+      return;
+    }
+    // The project lists the ids of ITS automations; the objects are global.
+    QSet<QString> ids;
+    for (const QJsonValue &v :
+         QJsonDocument::fromJson(b).object().value("status_automations").toArray())
+      ids.insert(v.isObject() ? v.toObject().value("id").toString()
+                              : v.toString());
+    QNetworkReply *r2 = m_nam->get(authGet("/api/data/status-automations"));
+    armTimeout(r2);
+    connect(r2, &QNetworkReply::finished, this,
+            [this, r2, pid, ids, onDone, onFail]() {
+      r2->deleteLater();
+      const QByteArray b2 = r2->readAll();
+      if (r2->error() != QNetworkReply::NoError) {
+        onFail(errorMessage(r2, b2));
+        return;
+      }
+      m_revAutomations.clear();
+      for (const QJsonValue &v : QJsonDocument::fromJson(b2).array()) {
+        const QJsonObject o = v.toObject();
+        if (!ids.contains(o.value("id").toString())) continue;
+        if (o.value("archived").toBool()) continue;
+        m_revAutomations.insert(o.value("in_task_type_id").toString() + "|" +
+                                o.value("in_task_status_id").toString());
+      }
+      m_revAutomationsProject = pid;
+      onDone();
+    });
+  });
 }
 

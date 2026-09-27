@@ -112,6 +112,10 @@ set(MOC_HEADERS
     ztorytaskflow.h
     ztorycharacterreview.h
     ztorykitsusync.h
+    ztoryassetpreview.h
+    ztorymouthlibrary.h
+    ztoriglibrary.h
+    ztorigclips.h
     ztorylipsync.h
     ztoryassetimport.h
     ztorylipsyncdialog.h
@@ -272,6 +276,10 @@ set(SOURCES
     ztorytaskflow.cpp
     ztorycharacterreview.cpp
     ztorykitsusync.cpp
+    ztoryassetpreview.cpp
+    ztorymouthlibrary.cpp
+    ztoriglibrary.cpp
+    ztorigclips.cpp
     ztorylipsync.cpp
     ztoryassetimport.cpp
     ztorylipsyncdialog.cpp

@@ -473,13 +473,31 @@ QVector<TimedWord> ZtoryModel::alignToScript(
     const QVector<TimedWord> &heard, const QVector<DialogueLine> &spoken) {
   // Il copione, appiattito in parole, ognuna col suo personaggio.
   QVector<TimedWord> script;
-  for (const DialogueLine &dl : spoken)
+  // Un pezzo senza lettere ne' cifre («—», «...») non e' una parola: non si
+  // pronuncia, e da solo prendeva fotogrammi — espeak non ne ricava bocche e
+  // nella colonna dei fonemi finiva il trattino stesso (Franco, 2026-09-27:
+  // «non ha molto senso che la punteggiatura prenda dei fotogrammi»). Si
+  // attacca alla parola prima, cosi' la colonna delle parole lo mostra
+  // ancora; in testa a una battuta, alla parola dopo.
+  static const QRegularExpression kSpoken(QStringLiteral("[\\p{L}\\p{N}]"));
+  for (const DialogueLine &dl : spoken) {
+    QString pending;  // punteggiatura in testa, in attesa di una parola
+    const int lineStart = script.size();
     for (const QString &w : dl.text.split(QRegExp("\\s+"), Qt::SkipEmptyParts)) {
+      if (!w.contains(kSpoken)) {
+        if (script.size() > lineStart)
+          script.last().word += " " + w;
+        else
+          pending += (pending.isEmpty() ? "" : " ") + w;
+        continue;
+      }
       TimedWord tw;
-      tw.word      = w;
+      tw.word      = pending.isEmpty() ? w : pending + " " + w;
       tw.assetUuid = dl.assetUuid;
       script.push_back(tw);
+      pending.clear();
     }
+  }
   // Senza copione non c'è niente da correggere: si tengono le parole sentite,
   // che è meglio di niente e mantiene i tempi.
   if (script.isEmpty()) return heard;
@@ -1400,6 +1418,7 @@ void ZtoryModel::saveProjectDb() {
     if (!as.filePath.isEmpty()) xml.writeAttribute("file", as.filePath);
     if (!as.rigPsdPath.isEmpty()) xml.writeAttribute("rigPsd", as.rigPsdPath);
     if (as.noFile) xml.writeAttribute("noFile", "1");
+    if (!as.previewSig.isEmpty()) xml.writeAttribute("previewSig", as.previewSig);
     if (!as.importPolicy.isDefault()) writeImportPolicy(xml, as.importPolicy);
     for (auto it = as.tasks.constBegin(); it != as.tasks.constEnd(); ++it) {
       xml.writeStartElement("atask");
@@ -1435,6 +1454,11 @@ void ZtoryModel::saveProjectDb() {
       xml.writeAttribute("technique", ps.technique);
     if (!ps.kitsuShotId.isEmpty())
       xml.writeAttribute("kitsuShotId", ps.kitsuShotId);
+    // An EMPTY base is still a base (Kitsu had nothing for the shot): the
+    // attribute says it exists and which Kitsu shot it was taken on, the
+    // <castSynced> children say what it holds.
+    if (ps.hasBreakdownBase)
+      xml.writeAttribute("castSynced", ps.breakdownBaseShotId);
     for (auto it = ps.tasks.constBegin(); it != ps.tasks.constEnd(); ++it) {
       xml.writeStartElement("task");
       xml.writeAttribute("type",   it.key());
@@ -1448,6 +1472,15 @@ void ZtoryModel::saveProjectDb() {
     for (const BreakdownEntry &be : ps.breakdown) {
       if (be.assetUuid.isEmpty()) continue;
       xml.writeStartElement("needs");
+      xml.writeAttribute("asset", be.assetUuid);
+      if (be.nbOccurrences != 1)
+        xml.writeAttribute("n", QString::number(be.nbOccurrences));
+      if (!be.label.isEmpty()) xml.writeAttribute("label", be.label);
+      xml.writeEndElement();
+    }
+    for (const BreakdownEntry &be : ps.breakdownBase) {
+      if (be.assetUuid.isEmpty()) continue;
+      xml.writeStartElement("castSynced");
       xml.writeAttribute("asset", be.assetUuid);
       if (be.nbOccurrences != 1)
         xml.writeAttribute("n", QString::number(be.nbOccurrences));
@@ -1563,6 +1596,7 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
       as.filePath     = a.value("file").toString();
       as.rigPsdPath   = a.value("rigPsd").toString();
       as.noFile       = a.value("noFile") == QLatin1String("1");
+      as.previewSig   = a.value("previewSig").toString();
       as.importPolicy = readImportPolicy(a);
       QString tg = a.value("tags").toString();
       if (!tg.isEmpty()) as.tags = tg.split('|', Qt::SkipEmptyParts);
@@ -1600,6 +1634,8 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
       ps.frames    = a.value("frames").toInt();
       ps.technique = a.value("technique").toString();
       ps.kitsuShotId = a.value("kitsuShotId").toString();
+      ps.breakdownBaseShotId = a.value("castSynced").toString();
+      ps.hasBreakdownBase    = a.hasAttribute("castSynced");
       if (!ps.uuid.isEmpty()) {
         pshots.push_back(ps);
         psi = (int)pshots.size() - 1;
@@ -1634,6 +1670,18 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
             a.hasAttribute("n") ? a.value("n").toInt() : 1;
         be.label = a.value("label").toString();
         if (!be.assetUuid.isEmpty()) pshots[psi].breakdown.push_back(be);
+      }
+    } else if (xml.name() == QLatin1String("castSynced")) {
+      // the breakdown's base: what Kitsu had at the last sync
+      if (psi >= 0 && psi < (int)pshots.size() &&
+          pshots[psi].hasBreakdownBase) {  // only under a declared base
+        auto a = xml.attributes();
+        BreakdownEntry be;
+        be.assetUuid = a.value("asset").toString();
+        be.nbOccurrences =
+            a.hasAttribute("n") ? a.value("n").toInt() : 1;
+        be.label = a.value("label").toString();
+        if (!be.assetUuid.isEmpty()) pshots[psi].breakdownBase.push_back(be);
       }
     }
   }
@@ -3231,6 +3279,15 @@ void ZtoryModel::updateColumnName(int si) {
   TApp *app = TApp::instance();
   ToonzScene *scene = app->getCurrentScene()->getScene();
   if (!scene) return;
+  // Not in an exported shot or a character scene: there a sub-scene column
+  // is a character, and naming it after a shot label renamed SOFIA's column
+  // «sh010» (Franco, 2026-09-27). Same guard as StoryboardPanel's.
+  if (!scene->isUntitled()) {
+    const QString role = ZtoryCharacter::roleOf(
+        scene->decodeFilePath(scene->getScenePath()).getQString());
+    if (role == QLatin1String("shot") || role == QLatin1String("character"))
+      return;
+  }
   TXsheet *xsh = scene->getXsheet();
   if (!xsh) return;
   int col = m_shots[si].xsheetColumn;

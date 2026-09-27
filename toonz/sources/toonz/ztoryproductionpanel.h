@@ -68,6 +68,7 @@ class ZtoryProductionPanel final : public TPanel {
   // Sync itself is ZtoryKitsuSync; the tracker shows it.
   QPushButton  *m_kitsuSyncBtn = nullptr;
   void onKitsuSync();
+  void maybeAutoSync();  // once per login, when the statuses are there
   QCheckBox    *m_kitsuHandlesCheck = nullptr;
   QSpinBox     *m_kitsuHandlesSpin  = nullptr;
   QLabel       *m_kitsuSyncLabel = nullptr;
@@ -122,8 +123,8 @@ private:
   void applyTaskTypesToTechnique(); // task-type list → selected workflow + persist
 
   QWidget *buildAssetTypesTab();
-  // Breakdown: which assets each shot needs. Read-only for now — it is
-  // pulled from Kitsu, where it is authored (Kitsu calls it «casting»).
+  // Breakdown: which assets each shot needs (Kitsu calls it «casting»).
+  // Written here or on Kitsu; the Sync merges the two.
   QWidget *buildBreakdownTab();
   void rebuildBreakdown();
   void onBreakdownContextMenu(const QPoint &pos);
@@ -151,12 +152,10 @@ private:
   QLineEdit *m_bgDirEdit = nullptr;
   QLineEdit *m_modelSheetDirEdit = nullptr;
   QTableWidget *m_breakdownTable = nullptr;
-  QPushButton  *m_breakdownPullBtn = nullptr;
   // Scrittura del breakdown a mano: fino alla 0.13.0 lo scriveva solo Kitsu.
   void onBreakdownAdd();
   void onBreakdownRemove();
   void onBreakdownFromDialogue();
-  QLabel       *m_breakdownLabel = nullptr;
   void reloadAssetTypesTab();        // model → asset-type list
   void reloadAssetTaskTypeList();    // selected asset type → its task pipeline
   void applyAssetTaskTypesToType();  // task list → selected asset type + persist

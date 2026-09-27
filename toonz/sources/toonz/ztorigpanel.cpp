@@ -1,5 +1,7 @@
 #include "ztorigpanel.h"
 #include "ztorigmouths.h"
+#include "ztoriglibrary.h"
+#include "ztorigclips.h"
 
 #include "tapp.h"
 #include "menubarcommandids.h"
@@ -631,6 +633,47 @@ ZtoRigPanel::ZtoRigPanel(QWidget *parent) : TPanel(parent) {
       tr("Store the pose authored at the current frame as a new action.\n"
          "Nothing changes on screen: the new dial starts at 0."));
   lay->addWidget(m_recordBt);
+  // The character's library (ztoriglibrary.h): what is recorded here goes
+  // back to the character, and what the library got comes into this copy.
+  {
+    auto *libRow = new QHBoxLayout();
+    auto *publishBt = new QPushButton(tr("Publish to Library…"), posesTab);
+    publishBt->setToolTip(
+        tr("Take this scene's poses and correctives to the character's\n"
+           "library, so every scene with the character can take them."));
+    auto *updateBt = new QPushButton(tr("Update from Library…"), posesTab);
+    updateBt->setToolTip(
+        tr("Bring into this copy of the character the poses and correctives\n"
+           "its library got after the import."));
+    libRow->addWidget(publishBt);
+    libRow->addWidget(updateBt);
+    lay->addLayout(libRow);
+    connect(publishBt, &QPushButton::clicked, this,
+            [this]() { ZtoRigLibrary::showPublishDialog(this); });
+    connect(updateBt, &QPushButton::clicked, this, [this]() {
+      ZtoRigLibrary::showUpdateDialog(this);
+      rebuild();  // new actions, new rows
+    });
+    // Animation clips: a stretch of time, not a state (ztorigclips.h).
+    auto *clipRow   = new QHBoxLayout();
+    auto *saveClip  = new QPushButton(tr("Save Clip…"), posesTab);
+    auto *insertClip = new QPushButton(tr("Insert Clip…"), posesTab);
+    saveClip->setToolTip(
+        tr("Save a stretch of this character's animation — a walk, a jump,\n"
+           "a piece of acting — in its library, with or without drawings."));
+    insertClip->setToolTip(
+        tr("Insert a clip from the character's library at the current frame:\n"
+           "once or repeated, faster or slower. Then edit it like any keys."));
+    clipRow->addWidget(saveClip);
+    clipRow->addWidget(insertClip);
+    lay->addLayout(clipRow);
+    connect(saveClip, &QPushButton::clicked, this,
+            [this]() { ZtoRigClips::showSaveDialog(this); });
+    connect(insertClip, &QPushButton::clicked, this, [this]() {
+      ZtoRigClips::showInsertDialog(this);
+      refreshValues();
+    });
+  }
 
   // ---- Vector pose, FIRST TEST ----
   //

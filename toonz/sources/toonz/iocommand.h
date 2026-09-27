@@ -20,6 +20,8 @@
 // STD includes
 #include <set>
 
+#include <QStringList>
+
 //====================================================
 
 //  Forward declarations
@@ -122,6 +124,18 @@ public:
 
   ImportPolicy importPolicy;  //!< [\p In]      Policy adopted for resources
                               //! external to current scene.
+  // Ztoryc: no questions — the export that fills the shots with their assets
+  // (2026-09-27). Every question gets its default answer: an existing file
+  // is KEPT, a sub-xsheet keeps its own camera, a level already loaded is not
+  // loaded twice; and the errors go into `errors` instead of a popup. One
+  // modal window per shot stopped a forty-shot export.
+  bool        silent = false;
+  QStringList errors;  //!< [\p Out] what went wrong, when silent
+  // Ztoryc: the scene the imported files belong to, when it is not the
+  // current one. The export imports a shot's assets while the STORYBOARD is
+  // open: the copies went to +extras/<storyboard>/ instead of +extras/<shot>/
+  // (the project's «use scene path»). Empty = the current scene, as always.
+  TFilePath importScenePath;
   bool expose;  //!< [\p In]      Whether resources must be exposed in the
                 //! xsheet.
 

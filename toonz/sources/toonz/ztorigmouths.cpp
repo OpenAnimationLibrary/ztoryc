@@ -1,4 +1,5 @@
 #include "ztorigmouths.h"
+#include "ztorymouthlibrary.h"
 
 #include "tapp.h"
 #include "ztorycharacter.h"
@@ -246,6 +247,25 @@ ZtoRigMouthsTab::ZtoRigMouthsTab(QWidget *parent) : QWidget(parent) {
     row->addWidget(m_newBt);
     row->addWidget(m_saveBt);
     row->addWidget(m_deleteBt);
+    // The sets made in a shot stay in the shot: this takes them back to the
+    // character's library (ztorymouthlibrary.h).
+    auto *publishBt = new QPushButton(tr("Publish…"), this);
+    publishBt->setToolTip(
+        tr("Take the saved mouth sets of this scene to the character's\n"
+           "library, so every scene that brings the character in from now on\n"
+           "has them."));
+    row->addWidget(publishBt);
+    connect(publishBt, &QPushButton::clicked, this,
+            [this]() { ZtoryMouthLibrary::showPublishDialog(this); });
+    // …and the other way, for the IMPORTED copies of a level's map: the
+    // sub-scenes read the library's sets live and need no update.
+    auto *updateBt = new QPushButton(tr("Update…"), this);
+    updateBt->setToolTip(
+        tr("Bring into this scene's imported copies the mouth sets the\n"
+           "characters' libraries got after the import."));
+    row->addWidget(updateBt);
+    connect(updateBt, &QPushButton::clicked, this,
+            [this]() { ZtoryMouthLibrary::showUpdateDialog(this); });
     lay->addLayout(row);
   }
 
