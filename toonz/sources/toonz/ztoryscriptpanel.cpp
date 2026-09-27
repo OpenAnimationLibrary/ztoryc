@@ -403,7 +403,7 @@ QString ZtoryScriptView::parseFdx(const QString &filePath) {
           result += "\n" + currentText.trimmed().toUpper() + "\n";
         } else if (currentType == "Action") {
           result += "\n" + currentText.trimmed() + "\n";
-        } else if (currentType == "Character") {
+        } else if (currentType == "Character"  /* FDX paragraph type, not an asset type */) {
           result += "\n          " + currentText.trimmed().toUpper() + "\n";
         } else if (currentType == "Dialogue") {
           result += "     " + currentText.trimmed() + "\n";

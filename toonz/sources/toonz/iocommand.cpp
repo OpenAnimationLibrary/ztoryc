@@ -98,6 +98,9 @@
 #include <boost/optional.hpp>
 #include <boost/utility/in_place_factory.hpp>
 
+// Ztoryc
+#include "ztorycharacterreview.h"  // offerWfaOnClose in saveSceneIfNeeded
+
 // #define USE_SQLITE_HDPOOL
 
 using namespace DVGui;
@@ -1351,6 +1354,7 @@ IoCmd::ConvertingPopup::~ConvertingPopup() {}
 
 bool IoCmd::saveSceneIfNeeded(QString msg) {
   TApp *app = TApp::instance();
+  bool changesDiscarded = false;  // Ztoryc: see offerWfaOnClose below
 
   if (app->getCurrentScene()->getDirtyFlag()) {
     QString question;
@@ -1371,6 +1375,7 @@ bool IoCmd::saveSceneIfNeeded(QString msg) {
       // save
       if (!IoCmd::saveScene()) return false;
     } else if (ret == 3) {
+      changesDiscarded = true;
     }
   }
 
@@ -1411,8 +1416,14 @@ bool IoCmd::saveSceneIfNeeded(QString msg) {
         IoCmd::saveNonSceneFiles();
       } else if (ret == 2) {
         // do nothing and continue
+        changesDiscarded = true;  // Ztoryc: the modified levels are dropped
       }
     }
+
+    // Ztoryc: closing a character scene whose rig is in WIP offers to send
+    // it for approval with a preview (Franco, 2026-09-26). Here, after the
+    // save questions and before the scene is cleared.
+    ZtoryCharacterReview::offerWfaOnClose(changesDiscarded);
 
     RenderingSuspender suspender;
 

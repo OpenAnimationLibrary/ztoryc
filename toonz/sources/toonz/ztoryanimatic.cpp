@@ -5995,7 +5995,7 @@ static void ztoryOfferSpeakerAlias(QWidget *parent, QTextEdit *field,
     QHash<QAction *, QString> byAction;
     const QString curAlias = m->speakerAlias(sel);
     for (const Asset &a : m->assets()) {
-      if (a.type.compare("Character", Qt::CaseInsensitive) != 0) continue;
+      if (!ZtoryModel::isCharacterType(a.type)) continue;
       QAction *act = sub->addAction(a.name);
       act->setCheckable(true);
       act->setChecked(!curAlias.isEmpty() && curAlias == a.uuid);

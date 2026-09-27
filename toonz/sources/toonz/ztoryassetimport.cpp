@@ -96,6 +96,26 @@ QString ztoryAssetReport(const QVector<ZtoryAssetCheck> &checks) {
 
 //-----------------------------------------------------------------------------
 
+QList<TXshLevel *> ztoryLoadPsdWithPolicy(const TFilePath &psd,
+                                          const AssetImportPolicy &policy,
+                                          int col0) {
+  PsdSettingsPopup popup;
+  popup.setPath(psd);
+  popup.applySettings(policy.psdLoadAs, policy.psdLevelName, policy.psdGroups,
+                      policy.psdSubScene);
+  IoCmd::LoadResourceArguments args;
+  args.importPolicy = policy.mode == AssetImportPolicy::Import
+                          ? IoCmd::LoadResourceArguments::IMPORT
+                          : IoCmd::LoadResourceArguments::LOAD;
+  args.row0 = 0;
+  args.col0 = col0;
+  IoCmd::loadPsdResource(args, &popup);
+  QList<TXshLevel *> levels;
+  for (TXshLevel *lv : args.loadedLevels)
+    if (lv) levels.append(lv);
+  return levels;
+}
+
 ZtoryImportedAssets ztoryImportShotAssets(const QString &shotUuid,
                                           TXsheet *subXsheet) {
   ZtoryImportedAssets res;
@@ -195,21 +215,9 @@ ZtoryImportedAssets ztoryImportShotAssets(const QString &shotUuid,
 
   // I psd, uno per volta: il popup porta le scelte di QUEL psd, quindi va
   // riconfigurato fra un file e l'altro.
-  for (const auto &pr : psdFiles) {
-    PsdSettingsPopup popup;
-    popup.setPath(pr.first);
-    popup.applySettings(pr.second.psdLoadAs, pr.second.psdLevelName,
-                        pr.second.psdGroups, pr.second.psdSubScene);
-    IoCmd::LoadResourceArguments args;
-    args.importPolicy = pr.second.mode == AssetImportPolicy::Import
-                            ? IoCmd::LoadResourceArguments::IMPORT
-                            : IoCmd::LoadResourceArguments::LOAD;
-    args.row0 = 0;
-    args.col0 = subXsheet->getColumnCount();
-    IoCmd::loadPsdResource(args, &popup);
-    for (TXshLevel *lv : args.loadedLevels)
-      if (lv) res.levels.append(lv);
-  }
+  for (const auto &pr : psdFiles)
+    res.levels.append(ztoryLoadPsdWithPolicy(pr.first, pr.second,
+                                             subXsheet->getColumnCount()));
 
   // Le colonne nate adesso sono quelle dopo `before`. Contate cosi' e non
   // dedotte dai valori che loadResources riporta: se un file fallisce a meta',

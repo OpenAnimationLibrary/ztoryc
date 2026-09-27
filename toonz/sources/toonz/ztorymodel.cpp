@@ -1,4 +1,5 @@
 #include "ztorymodel.h"
+#include "ztorytaskflow.h"
 #include "ztorycharacter.h"
 #include "ztoryshotops.h"
 #include "toonzqt/dvdialog.h"
@@ -108,6 +109,37 @@ QString NumberingConfig::shotName(int idx) const {
 
 // ─── Singleton ────────────────────────────────────────────────────────────────
 
+const QString ZtoryModel::kCharacterType  = QStringLiteral("Character");
+const QString ZtoryModel::kStoryboardTask = QStringLiteral("Storyboard");
+
+bool ZtoryModel::isCharacterType(const QString &type) {
+  return type.compare(kCharacterType, Qt::CaseInsensitive) == 0;
+}
+
+bool ZtoryModel::isStoryboardTask(const QString &taskType) {
+  return taskType.compare(kStoryboardTask, Qt::CaseInsensitive) == 0;
+}
+
+const QVector<TaskStatus> &ZtoryModel::allTaskStatuses() {
+  static const QVector<TaskStatus> all = {TaskStatus::Todo,  TaskStatus::Ready,
+                                          TaskStatus::Wip,   TaskStatus::Wfa,
+                                          TaskStatus::Retake, TaskStatus::Done};
+  return all;
+}
+
+// Canonical Kitsu palette (matches the live Kitsu task_status colours).
+QColor ZtoryModel::taskStatusColor(TaskStatus s) {
+  switch (s) {
+  case TaskStatus::Ready:  return QColor("#FBC02D");  // amber
+  case TaskStatus::Wip:    return QColor("#3273DC");  // blue
+  case TaskStatus::Wfa:    return QColor("#AB26FF");  // purple
+  case TaskStatus::Retake: return QColor("#FF3860");  // red
+  case TaskStatus::Done:   return QColor("#22D160");  // green
+  case TaskStatus::Todo:
+  default:                 return QColor("#9E9E9E");  // grey
+  }
+}
+
 ZtoryModel::ZtoryModel() : m_fps(24) {
   m_follow = QSettings().value("Ztoryc/followBoardTimeline", false).toBool();
   m_animaticSidePanels = QStringList{ "Storyboard" };
@@ -156,30 +188,9 @@ void ZtoryModel::onSceneSwitchedAdvanceShot() {
   if (!QFile::exists(projectDb)) return;
 
   loadProjectDbFromPath(projectDb);
-  for (ProjectShot &ps : m_projectShots) {
-    if (ps.uuid != uuid) continue;
-    QString tech = !technique.isEmpty() ? technique
-                   : (ps.technique.isEmpty() ? m_defaultTechnique : ps.technique);
-    QStringList tts;
-    if (const Technique *t = findTechnique(tech)) tts = t->taskTypes;
-    // Opening the shot scene resumes work: walk the technique's tasks in order,
-    // skip Storyboard (the pre-.tnz board pass) and any already-Done task; the
-    // first not-Done task is the active one — if it's Ready (next up) or Retake
-    // (kicked back by review) it advances to Wip. value() avoids inserting empty
-    // Todo entries for tasks the artist hasn't reached yet.
-    for (const QString &tt : tts) {
-      if (tt == "Storyboard") continue;
-      const TaskStatus s = ps.tasks.value(tt).status;
-      if (s == TaskStatus::Done) continue;
-      if (s == TaskStatus::Ready || s == TaskStatus::Retake) {
-        ps.tasks[tt].status = TaskStatus::Wip;
-        saveProjectDb();
-        emit taskStatusChanged();
-      }
-      break;  // first not-Done task handled — stop
-    }
-    break;
-  }
+  // The rule itself lives in ZtoryTaskFlow (it used to be here AND, divergent,
+  // in StoryboardPanel::loadZtoryc — which put Storyboard back to WIP).
+  ZtoryTaskFlow::shotOpened(uuid, technique);
 }
 
 // ─── Production techniques / tasks ──────────────────────────────────────────
@@ -312,7 +323,7 @@ QVector<DialogueLine> ZtoryModel::parseDialogue(const QString &text) const {
   // Indice dei personaggi del progetto, per nome minuscolo.
   QHash<QString, QString> uuidByName;
   for (const Asset &a : m_assets)
-    if (a.type.compare("Character", Qt::CaseInsensitive) == 0)
+    if (ZtoryModel::isCharacterType(a.type))
       uuidByName.insert(a.name.trimmed().toLower(), a.uuid);
   for (auto it = m_speakerAliases.constBegin(); it != m_speakerAliases.constEnd(); ++it)
     uuidByName.insert(it.key(), it.value());
@@ -542,7 +553,7 @@ bool ZtoryModel::speakerAt(const QString &rawLine, const QString &rawNext,
 
   QHash<QString, QString> uuidByName;
   for (const Asset &a : m_assets)
-    if (a.type.compare("Character", Qt::CaseInsensitive) == 0)
+    if (ZtoryModel::isCharacterType(a.type))
       uuidByName.insert(a.name.trimmed().toLower(), a.uuid);
   // Gli alias contano come nomi veri: e' il loro scopo.
   for (auto it = m_speakerAliases.constBegin(); it != m_speakerAliases.constEnd(); ++it)
@@ -573,6 +584,26 @@ QStringList ZtoryModel::unknownSpeakers(const QString &text) const {
     if (!dl.character.isEmpty() && !dl.matched && !out.contains(dl.character))
       out << dl.character;
   return out;
+}
+
+void ZtoryModel::setAssetRigPsd(int i, const QString &absPath) {
+  if (i < 0 || i >= (int)m_assets.size()) return;
+  QString stored = absPath;
+  const QString db = projectDbPath();
+  if (!absPath.isEmpty() && !db.isEmpty()) {
+    const QString rel = QDir(QFileInfo(db).absolutePath()).relativeFilePath(absPath);
+    if (rel != ".." && !rel.startsWith("../") && !QDir::isAbsolutePath(rel))
+      stored = rel;
+  }
+  m_assets[i].rigPsdPath = stored;
+}
+
+QString ZtoryModel::resolveAssetRigPsd(const Asset &a) const {
+  if (a.rigPsdPath.isEmpty() || QDir::isAbsolutePath(a.rigPsdPath))
+    return a.rigPsdPath;
+  const QString db = projectDbPath();
+  if (db.isEmpty()) return QString();
+  return QDir(QFileInfo(db).absolutePath()).absoluteFilePath(a.rigPsdPath);
 }
 
 AssetImportPolicy ZtoryModel::effectiveImportPolicy(const Asset &a) const {
@@ -631,7 +662,7 @@ QString ZtoryModel::resolveAssetFile(const Asset &a, QString *why) const {
   // 2. Altrimenti la convenzione: cartella della categoria + nome dell'asset.
   const QString dir = assetDirForType(a.type);
   if (dir.isEmpty())
-    return fail(a.type.compare("Character", Qt::CaseInsensitive) == 0
+    return fail(ZtoryModel::isCharacterType(a.type)
                     ? tr("a character has no folder: link its scene")
                     : tr("no folder set for type %1").arg(a.type));
   if (!QDir(dir).exists()) return fail(tr("folder not found: %1").arg(dir));
@@ -781,10 +812,14 @@ void ZtoryModel::removeAssetAt(int i) {
   emit assetsChanged();
 }
 
+// Ztoryc: a hand edit in the tracker. It goes through ZtoryTaskFlow so the
+// rules (a Done readies the next task) and the push to Kitsu see it too.
 void ZtoryModel::setAssetTaskStatus(int i, const QString &taskType,
                                     TaskStatus status) {
   if (i < 0 || i >= (int)m_assets.size()) return;
-  m_assets[i].tasks[taskType].status = status;
+  ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Asset, m_assets[i].uuid,
+                           taskType, status, ZtoryTaskFlow::Origin::User,
+                           /*batch=*/true);
   emit assetsChanged();
 }
 
@@ -793,6 +828,63 @@ void ZtoryModel::setAssetTaskStatusByUuid(const QString &uuid,
                                           TaskStatus status) {
   for (int i = 0; i < (int)m_assets.size(); i++)
     if (m_assets[i].uuid == uuid) { setAssetTaskStatus(i, taskType, status); return; }
+}
+
+TaskStatus ZtoryModel::taskStatusOf(int entity, const QString &uuid,
+                                    const QString &taskType, bool *found) const {
+  const QMap<QString, TaskState> *tasks = tasksOf(entity, uuid);
+  if (found) *found = tasks != nullptr;
+  return tasks ? tasks->value(taskType).status : TaskStatus::Todo;
+}
+
+QMap<QString, TaskState> *ZtoryModel::tasksOf(int entity, const QString &uuid) {
+  if (entity == 0) {
+    for (ProjectShot &ps : m_projectShots)
+      if (ps.uuid == uuid) return &ps.tasks;
+  } else {
+    for (Asset &a : m_assets)
+      if (a.uuid == uuid) return &a.tasks;
+  }
+  return nullptr;
+}
+
+const QMap<QString, TaskState> *ZtoryModel::tasksOf(int entity,
+                                                    const QString &uuid) const {
+  return const_cast<ZtoryModel *>(this)->tasksOf(entity, uuid);
+}
+
+bool ZtoryModel::setTaskSynced(int entity, const QString &uuid,
+                               const QString &taskType, TaskStatus synced) {
+  QMap<QString, TaskState> *tasks = tasksOf(entity, uuid);
+  if (!tasks) return false;
+  TaskState &ts = (*tasks)[taskType];
+  if (ts.hasSynced && ts.synced == synced) return false;  // nothing moved
+  ts.hasSynced = true;
+  ts.synced    = synced;
+  return true;
+}
+
+bool ZtoryModel::taskSyncedOf(int entity, const QString &uuid,
+                              const QString &taskType,
+                              TaskStatus *synced) const {
+  const QMap<QString, TaskState> *tasks = tasksOf(entity, uuid);
+  if (!tasks) return false;
+  const auto it = tasks->constFind(taskType);
+  if (it == tasks->constEnd() || !it.value().hasSynced) return false;
+  if (synced) *synced = it.value().synced;
+  return true;
+}
+
+bool ZtoryModel::writeTaskStatus(int entity, const QString &uuid,
+                                 const QString &taskType, TaskStatus status) {
+  QMap<QString, TaskState> *tasks = tasksOf(entity, uuid);
+  if (!tasks) return false;
+  (*tasks)[taskType].status = status;
+  // A project-shot write is mirrored into the open scene's shot.
+  if (entity == 0)
+    for (ShotData &sd : m_shots)
+      if (sd.uuid == uuid) { sd.tasks[taskType].status = status; break; }
+  return true;
 }
 
 void ZtoryModel::setAssetTaskAssignees(int i, const QString &taskType,
@@ -1060,11 +1152,14 @@ void ZtoryModel::saveProjectDb() {
       xml.writeAttribute("kitsuAssetId", as.kitsuAssetId);
     if (!as.tags.isEmpty()) xml.writeAttribute("tags", as.tags.join("|"));
     if (!as.filePath.isEmpty()) xml.writeAttribute("file", as.filePath);
+    if (!as.rigPsdPath.isEmpty()) xml.writeAttribute("rigPsd", as.rigPsdPath);
     if (!as.importPolicy.isDefault()) writeImportPolicy(xml, as.importPolicy);
     for (auto it = as.tasks.constBegin(); it != as.tasks.constEnd(); ++it) {
       xml.writeStartElement("atask");
       xml.writeAttribute("type",   it.key());
       xml.writeAttribute("status", taskStatusLabel(it.value().status));
+      if (it.value().hasSynced)
+        xml.writeAttribute("synced", taskStatusLabel(it.value().synced));
       if (!it.value().assignees.isEmpty())
         xml.writeAttribute("assignee", it.value().assignees.join(", "));
       xml.writeEndElement();
@@ -1097,6 +1192,8 @@ void ZtoryModel::saveProjectDb() {
       xml.writeStartElement("task");
       xml.writeAttribute("type",   it.key());
       xml.writeAttribute("status", taskStatusLabel(it.value().status));
+      if (it.value().hasSynced)
+        xml.writeAttribute("synced", taskStatusLabel(it.value().synced));
       if (!it.value().assignees.isEmpty())
         xml.writeAttribute("assignee", it.value().assignees.join(", "));
       xml.writeEndElement();
@@ -1215,6 +1312,7 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
       as.name  = a.value("name").toString();
       as.kitsuAssetId = a.value("kitsuAssetId").toString();
       as.filePath     = a.value("file").toString();
+      as.rigPsdPath   = a.value("rigPsd").toString();
       as.importPolicy = readImportPolicy(a);
       QString tg = a.value("tags").toString();
       if (!tg.isEmpty()) as.tags = tg.split('|', Qt::SkipEmptyParts);
@@ -1228,6 +1326,10 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
         if (!type.isEmpty()) {
           TaskState ts;
           ts.status = taskStatusFromLabel(a.value("status").toString());
+          if (a.hasAttribute("synced")) {
+            ts.hasSynced = true;
+            ts.synced    = taskStatusFromLabel(a.value("synced").toString());
+          }
           for (const QString &p : a.value("assignee").toString().split(',', Qt::SkipEmptyParts)) {
             QString t = p.trimmed();
             if (!t.isEmpty()) ts.assignees << t;
@@ -1261,6 +1363,10 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
         if (!type.isEmpty()) {
           TaskState ts;
           ts.status = taskStatusFromLabel(a.value("status").toString());
+          if (a.hasAttribute("synced")) {
+            ts.hasSynced = true;
+            ts.synced    = taskStatusFromLabel(a.value("synced").toString());
+          }
           for (const QString &p : a.value("assignee").toString().split(',', Qt::SkipEmptyParts)) {
             QString t = p.trimmed();
             if (!t.isEmpty()) ts.assignees << t;
@@ -1287,7 +1393,8 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
   // it where missing so the board/animatic task exists (and can be pushed to
   // Kitsu + receive preview uploads). Persisted on the next project save.
   for (Technique &t : m_techniques)
-    if (!t.taskTypes.contains("Storyboard")) t.taskTypes.prepend("Storyboard");
+    if (!t.taskTypes.contains(kStoryboardTask, Qt::CaseInsensitive))
+      t.taskTypes.prepend(kStoryboardTask);
   // Asset types: adopt the file's list; a legacy project (no <assetTypes> block)
   // re-seeds the canonical defaults so the taxonomy is never empty.
   m_assetTypes = atypes;
@@ -1295,6 +1402,19 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
   m_assets    = assets;
   m_projectShots   = pshots;
   m_storyboardFiles = sboards;
+  // Task names are not case-sensitive. A pull from before addAssetTaskType
+  // compared names without case left «modeling»/«Modeling» and
+  // «rigging»/«Rigging» on every character of CS2606 (2026-09-26), the
+  // lowercase ones stuck at TODO. Merged here, in memory; the file is
+  // rewritten clean on the next save.
+  for (Technique &t : m_techniques)
+    t.taskTypes = ZtoryTaskFlow::uniqueIgnoringCase(t.taskTypes);
+  for (AssetType &t : m_assetTypes)
+    t.taskTypes = ZtoryTaskFlow::uniqueIgnoringCase(t.taskTypes);
+  for (Asset &a : m_assets)
+    ZtoryTaskFlow::foldTaskNames(a.tasks, assetTaskTypesForType(a.type));
+  for (ProjectShot &ps : m_projectShots)
+    ZtoryTaskFlow::foldTaskNames(ps.tasks, taskTypesForProjectShot(ps));
   loadThumbsFromDisk();
 }
 
@@ -1313,17 +1433,8 @@ QString ZtoryModel::firstProductionTaskType(const QString &technique) const {
   const Technique *t = findTechnique(technique);
   if (!t) return QString();
   for (const QString &tt : t->taskTypes)
-    if (tt != "Storyboard") return tt;
+    if (!isStoryboardTask(tt)) return tt;
   return QString();
-}
-
-QString ZtoryModel::nextTaskType(const QString &technique,
-                                 const QString &afterTask) const {
-  const Technique *t = findTechnique(technique);
-  if (!t) return QString();
-  const int i = t->taskTypes.indexOf(afterTask);
-  if (i < 0 || i + 1 >= t->taskTypes.size()) return QString();
-  return t->taskTypes[i + 1];
 }
 
 std::vector<std::pair<int, int>> ZtoryModel::projectShotFrameRanges() const {
@@ -1437,19 +1548,15 @@ void ZtoryModel::publishShotsToProjectDb(const QString &sourceFile) {
   emit taskStatusChanged();
 }
 
+// Ztoryc: a hand edit in the tracker — through ZtoryTaskFlow, like the asset
+// one above. writeTaskStatus mirrors it into the open scene's shot.
 void ZtoryModel::setProjectShotTaskStatusByUuid(const QString &uuid,
                                                 const QString &taskType,
                                                 TaskStatus status) {
-  for (ProjectShot &ps : m_projectShots) {
-    if (ps.uuid == uuid) {
-      ps.tasks[taskType].status = status;
-      // Mirror into the open scene's shot for .ztoryc consistency.
-      for (ShotData &sd : m_shots)
-        if (sd.uuid == uuid) { sd.tasks[taskType].status = status; break; }
-      emit taskStatusChanged();
-      return;
-    }
-  }
+  if (ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Shot, uuid, taskType,
+                               status, ZtoryTaskFlow::Origin::User,
+                               /*batch=*/true))
+    emit taskStatusChanged();
 }
 
 void ZtoryModel::setProjectShotAssigneesByUuid(const QString &uuid,

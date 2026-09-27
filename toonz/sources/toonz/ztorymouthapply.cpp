@@ -299,7 +299,7 @@ QVector<MouthApplyTarget> ZtoryMouthApply::findTargets(ToonzScene *scene) {
     // lupo si e' visto proporre i set di SOFIA).
     QVector<QPair<QString, MouthMap>> candidates;
     for (const Asset &a : model->assets()) {
-      if (a.type.compare("Character", Qt::CaseInsensitive) != 0) continue;
+      if (!ZtoryModel::isCharacterType(a.type)) continue;
       const QString libScene = model->resolveAssetFile(a);
       if (libScene.isEmpty()) continue;
       MouthMap m;

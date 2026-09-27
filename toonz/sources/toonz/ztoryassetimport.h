@@ -27,6 +27,8 @@
 
 class TXsheet;
 class TXshLevel;
+class TFilePath;
+struct AssetImportPolicy;
 
 //----------------------------------------------------------------------------
 // Cosa si sa di UN asset distinto richiesto dagli shot che si stanno per
@@ -69,3 +71,11 @@ struct ZtoryImportedAssets {
 // perche': il controllo di prima li ha gia' mostrati all'utente.
 ZtoryImportedAssets ztoryImportShotAssets(const QString &shotUuid,
                                           TXsheet *subXsheet);
+
+// Carica UN psd nello xsheet corrente, dalla colonna `col0`, con le opzioni
+// PSD e il modo (Load / Import) di `policy`. Restituisce i livelli caricati.
+// Serve all'export degli shot e alla creazione della scena del personaggio
+// (il PSD da riggare): due copie delle stesse righe divergono.
+QList<TXshLevel *> ztoryLoadPsdWithPolicy(const TFilePath &psd,
+                                          const AssetImportPolicy &policy,
+                                          int col0);

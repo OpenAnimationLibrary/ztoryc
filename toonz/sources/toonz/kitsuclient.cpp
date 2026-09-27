@@ -8,10 +8,12 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QSettings>
+#include <QTimer>
 #include <QUrl>
 #include <QFile>
 #include <QFileInfo>
 #include "ztorysecret.h"
+#include "ztorytaskflow.h"
 
 #include <QDir>
 #include <QMimeDatabase>
@@ -26,6 +28,7 @@ const char *kGroupEmail    = "Ztoryc/Kitsu/Email";
 const char *kGroupPassword = "Ztoryc/Kitsu/Password";
 const char *kSecretService = "Ztoryc/Kitsu";
 const char *kGroupHasPwd   = "Ztoryc/Kitsu/PasswordSaved";
+const char *kGroupAutoPush = "Ztoryc/Kitsu/AutoPushStatus";
 
 // Pull a human-readable message out of an error reply (Zou answers with a JSON
 // body { "message": ... } on most failures); fall back to Qt's error string.
@@ -71,6 +74,10 @@ KitsuClient *KitsuClient::instance() {
   if (!s) {
     s = new KitsuClient();
     s->loadSettings();
+    // Every status change made in Ztoryc passes here; onTaskTransition sends
+    // it only when the automatic push is on.
+    connect(ZtoryModel::instance()->taskEvents(), &ZtoryTaskEvents::transitioned,
+            s, &KitsuClient::onTaskTransition);
   }
   return s;
 }
@@ -80,11 +87,13 @@ KitsuClient *KitsuClient::instance() {
 void KitsuClient::setBaseUrl(const QString &url) {
   m_baseUrl = url.trimmed();
   while (m_baseUrl.endsWith('/')) m_baseUrl.chop(1);
+  m_trCachesLoaded = false;  // another server: other ids
 }
 
 void KitsuClient::setLocalUrl(const QString &url) {
   m_localUrl = url.trimmed();
   while (m_localUrl.endsWith('/')) m_localUrl.chop(1);
+  m_trCachesLoaded = false;
 }
 
 void KitsuClient::loadSettings() {
@@ -93,6 +102,7 @@ void KitsuClient::loadSettings() {
   setLocalUrl(s.value(kGroupLocalUrl).toString());
   m_email         = s.value(kGroupEmail).toString();
   m_passwordSaved = s.value(kGroupHasPwd, false).toBool();
+  m_autoPushStatus = s.value(kGroupAutoPush, false).toBool();
   if (!m_passwordSaved || m_email.isEmpty()) return;
 
   // Until 0.13.2 the password sat in QSettings as readable text — the registry
@@ -164,6 +174,29 @@ void KitsuClient::saveSettings(bool savePassword) {
 // Status mapping
 //----------------------------------------------------------------------------
 
+// One task status as the server sends it. Read in the status fetch and in
+// the safe push: one parser, or the two copies drift apart.
+static KitsuTaskStatus parseTaskStatus(const QJsonObject &o) {
+  KitsuTaskStatus s;
+  s.id                = o.value("id").toString();
+  s.name              = o.value("name").toString();
+  s.shortName         = o.value("short_name").toString();
+  s.color             = o.value("color").toString();
+  s.isDone            = o.value("is_done").toBool();
+  s.isRetake          = o.value("is_retake").toBool();
+  s.isFeedbackRequest = o.value("is_feedback_request").toBool();
+  s.isDefault         = o.value("is_default").toBool();
+  return s;
+}
+
+// The six short names of Ztoryc's pipeline: only these are used to WRITE a
+// status, so Kitsu's approved/rejected/neutral don't shadow them.
+static bool isPipelineShortName(const QString &shortName) {
+  const QString sn = shortName.toLower();
+  return sn == "todo" || sn == "ready" || sn == "wip" || sn == "wfa" ||
+         sn == "retake" || sn == "done";
+}
+
 TaskStatus KitsuClient::mapStatus(const KitsuTaskStatus &s) {
   const QString sn = s.shortName.toLower();
   // Primary: the canonical Kitsu short names line up 1:1 with our pipeline.
@@ -183,6 +216,16 @@ TaskStatus KitsuClient::mapStatus(const KitsuTaskStatus &s) {
   if (sn == "approved") return TaskStatus::Done;
   if (sn == "rejected") return TaskStatus::Retake;
   return TaskStatus::Todo;
+}
+
+// Reverse map: Ztoryc TaskStatus -> Kitsu status id. Only the six pipeline
+// short names, so approved/rejected/neutral don't shadow them. It was copied
+// in the shot push, the asset push and the preview upload (2026-09-26).
+void KitsuClient::rebuildStatusIdByZ() {
+  m_statusIdByZ.clear();
+  for (const KitsuTaskStatus &st : m_taskStatuses)
+    if (isPipelineShortName(st.shortName))
+      m_statusIdByZ.insert(static_cast<int>(mapStatus(st)), st.id);
 }
 
 TaskStatus KitsuClient::toZtoryStatus(const QString &kitsuStatusId) const {
@@ -225,6 +268,7 @@ void KitsuClient::onLoginReply(QNetworkReply *reply) {
   const QJsonObject o = QJsonDocument::fromJson(body).object();
   m_accessToken       = o.value("access_token").toString();
   m_refreshToken      = o.value("refresh_token").toString();
+  m_trCachesLoaded    = false;  // a new login may be on another server
 
   if (m_accessToken.isEmpty()) {
     m_syncAfterLogin = false;
@@ -712,16 +756,24 @@ void KitsuClient::pushTasks(const QString &projectId,
 
   // Reverse status map: Ztoryc TaskStatus -> canonical Kitsu status id (only the
   // six pipeline short names, so approved/rejected/neutral don't shadow them).
-  m_statusIdByZ.clear();
-  for (const KitsuTaskStatus &st : m_taskStatuses) {
-    const QString sn = st.shortName.toLower();
-    if (sn == "todo" || sn == "ready" || sn == "wip" || sn == "wfa" ||
-        sn == "retake" || sn == "done")
-      m_statusIdByZ.insert(static_cast<int>(mapStatus(st)), st.id);
-  }
+  rebuildStatusIdByZ();
   // Load the roster first so assignee names resolve to person ids for the
   // add-only assign pass that follows the status updates.
   loadRosterThen(m_taskProjectId, [this]() { taskLoadTaskTypes(); });
+}
+
+// The SHOT task types of a /api/data/task-types answer into m_ttIdByName
+// (and their priority). Read by the task push and the clip upload: one
+// parser, where there were two copies of the same loop.
+void KitsuClient::parseShotTaskTypes(const QByteArray &body) {
+  for (const QJsonValue &v : QJsonDocument::fromJson(body).array()) {
+    const QJsonObject o = v.toObject();
+    if (o.value("for_entity").toString() != QLatin1String("Shot")) continue;
+    m_ttIdByName.insert(o.value("name").toString().toLower(),
+                        o.value("id").toString());
+    m_ttPriorityById.insert(o.value("id").toString(),
+                            o.value("priority").toInt());
+  }
 }
 
 void KitsuClient::taskLoadTaskTypes() {
@@ -731,15 +783,7 @@ void KitsuClient::taskLoadTaskTypes() {
     r->deleteLater();
     const QByteArray b = r->readAll();
     if (r->error() != QNetworkReply::NoError) { taskFail(errorMessage(r, b)); return; }
-    for (const QJsonValue &v : QJsonDocument::fromJson(b).array()) {
-      const QJsonObject o = v.toObject();
-      if (o.value("for_entity").toString() == "Shot") {
-        m_ttIdByName.insert(o.value("name").toString().toLower(),
-                            o.value("id").toString());
-        m_ttPriorityById.insert(o.value("id").toString(),
-                                o.value("priority").toInt());
-      }
-    }
+    parseShotTaskTypes(b);
     // Distinct task-type ids actually used by the queue. The ones Kitsu does
     // not have at all are created next (Franco, 2026-09-24: Ztoryc owns the
     // workflows, so Kitsu gets the task types they need).
@@ -936,10 +980,19 @@ void KitsuClient::taskCreateMissingNext() {
                              .arg(m_taskCreateList.size()));
   QNetworkReply *r = authPost("/api/data/tasks",
                               newTaskBody(m_taskProjectId, shotId, ttId));
-  connect(r, &QNetworkReply::finished, this, [this, r, shotId, ttId]() {
+  const int qi = m_taskCreateList[m_taskCreateIdx];
+  connect(r, &QNetworkReply::finished, this, [this, r, shotId, ttId, qi]() {
     r->deleteLater();
     const QByteArray b = r->readAll();
     if (r->error() != QNetworkReply::NoError) { taskFail(errorMessage(r, b)); return; }
+    // A task just created is Todo on Kitsu: so is its base (a task deleted on
+    // Kitsu and recreated here must not read as a conflict with an old base).
+    // On a task just born, Ztoryc's status is the only one there is: it is
+    // sent now, not at the next Sync.
+    m_taskQueue[qi].expected   = TaskStatus::Todo;
+    m_taskQueue[qi].createOnly = m_taskQueue[qi].status == TaskStatus::Todo;
+    ZtoryTaskFlow::markSynced(ZtoryTaskFlow::Entity::Shot, m_taskQueue[qi].uuid,
+                              m_taskQueue[qi].taskType, TaskStatus::Todo);
     const QJsonObject o = QJsonDocument::fromJson(b).object();
     const QString key   = shotId + "/" + ttId;
     m_taskIdByKey.insert(key, o.value("id").toString());
@@ -967,7 +1020,17 @@ void KitsuClient::taskApplyNext() {
     }
     // Already at the target status in Kitsu → don't re-comment (would spam the
     // activity feed and notifications); only touch what actually changed.
-    if (m_taskStatusByKey.value(shotId + "/" + ttId) == statusId) {
+    const QString remoteId = m_taskStatusByKey.value(shotId + "/" + ttId);
+    if (remoteId == statusId) {
+      ZtoryTaskFlow::markSynced(ZtoryTaskFlow::Entity::Shot, t.uuid,
+                                t.taskType, t.status);
+      ++m_taskUnchanged;
+      ++m_taskApplyIdx;
+      continue;
+    }
+    // Kitsu moved on since the last sync, or has a status Ztoryc does not
+    // know: its status is kept (the pull that follows brings it in).
+    if (!isPipelineStatusId(remoteId) || toZtoryStatus(remoteId) != t.expected) {
       ++m_taskUnchanged;
       ++m_taskApplyIdx;
       continue;
@@ -980,10 +1043,14 @@ void KitsuClient::taskApplyNext() {
     body["comment"]        = "Status synced from Ztoryc";
     QNetworkReply *r = authPost("/api/actions/tasks/" + taskId + "/comment",
                                 QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(r, &QNetworkReply::finished, this, [this, r]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, t]() {
       r->deleteLater();
       const QByteArray b = r->readAll();
       if (r->error() != QNetworkReply::NoError) { taskFail(errorMessage(r, b)); return; }
+      // Written: the base is what Kitsu has now, even if the Sync stops later.
+      ZtoryTaskFlow::markSynced(ZtoryTaskFlow::Entity::Shot, t.uuid, t.taskType,
+                                t.status);
+      ZtoryModel::instance()->saveProjectDb();
       ++m_taskStatusesSet;
       ++m_taskApplyIdx;
       taskApplyNext();
@@ -1191,6 +1258,12 @@ QVector<KitsuAssetTaskPush> KitsuClient::buildAssetTasksFromModel() {
       p.taskType  = tt;
       p.status    = a.tasks.value(tt).status;
       p.assignees = a.tasks.value(tt).assignees;
+      // As for shots: only what changed in Ztoryc, only over the base.
+      p.createOnly = !ZtoryTaskFlow::changedSinceSync(
+          ZtoryTaskFlow::Entity::Asset, a.uuid, tt);
+      p.expected = ZtoryTaskFlow::expectedOnServer(
+          ZtoryTaskFlow::Entity::Asset, a.uuid, tt);
+      p.uuid     = a.uuid;
       out.push_back(p);
     }
   }
@@ -1342,17 +1415,11 @@ void KitsuClient::pushAssetTasks(const QString &projectId,
   m_atAssigneesByKey.clear();
   m_assignQueue.clear();
   m_assignIdx = 0;
-  m_atTtCreateQueue.clear();
+  m_atCreateList.clear();
   m_atCreateIdx = m_atApplyIdx = m_atStatusesSet = m_atUnchanged = 0;
 
   // Reverse status map (same six pipeline statuses as the shot push).
-  m_statusIdByZ.clear();
-  for (const KitsuTaskStatus &st : m_taskStatuses) {
-    const QString sn = st.shortName.toLower();
-    if (sn == "todo" || sn == "ready" || sn == "wip" || sn == "wfa" ||
-        sn == "retake" || sn == "done")
-      m_statusIdByZ.insert(static_cast<int>(mapStatus(st)), st.id);
-  }
+  rebuildStatusIdByZ();
   // Load the roster first so assignee names resolve for the add-only assign pass.
   loadRosterThen(m_atProjectId, [this]() { atLoadTaskTypes(); });
 }
@@ -1370,29 +1437,46 @@ void KitsuClient::atLoadTaskTypes() {
         m_atTtIdByName.insert(o.value("name").toString().toLower(),
                               o.value("id").toString());
     }
-    // Distinct asset task-type ids used by the queue and known to Kitsu.
-    for (const KitsuAssetTaskPush &t : m_atQueue) {
-      const QString id = m_atTtIdByName.value(normalizeTaskType(t.taskType));
-      if (!id.isEmpty() && !m_atTtCreateQueue.contains(id))
-        m_atTtCreateQueue.push_back(id);
-    }
-    atCreateNext();
+    // The missing tasks are created after the existing ones are read
+    // (atLoadTasks → atCreateNext), for exactly these assets.
+    atLoadAssetTypes();
   });
 }
 
+// Ztoryc: the missing tasks of THESE assets, created one by one, as the shot
+// push does. The «/assets/create-tasks» action it replaced, sent with an
+// empty body, created the task type on EVERY asset of the project — the
+// other episodes' too — and since the Sync (2026-09-27) at every Sync.
 void KitsuClient::atCreateNext() {
-  if (m_atCreateIdx >= m_atTtCreateQueue.size()) { atLoadAssetTypes(); return; }
-  const QString ttId = m_atTtCreateQueue[m_atCreateIdx];
+  if (m_atCreateIdx >= m_atCreateList.size()) { atApplyNext(); return; }
+  if (m_statusIdByZ.value(static_cast<int>(TaskStatus::Todo)).isEmpty()) {
+    atFail(tr("Kitsu has no \"todo\" task status: cannot create tasks."));
+    return;
+  }
+  const KitsuAssetTaskPush &t = m_atQueue[m_atCreateList[m_atCreateIdx]];
+  const QString ttId    = m_atTtIdByName.value(normalizeTaskType(t.taskType));
+  const QString typeId  = m_atAssetTypeIdByName.value(t.assetType.toLower());
+  const QString assetId = m_atAssetIds.value(typeId + "/" + t.assetName.toLower());
   emit shotsPushProgress(tr("Creating asset tasks (%1/%2)…")
                              .arg(m_atCreateIdx + 1)
-                             .arg(m_atTtCreateQueue.size()));
-  QNetworkReply *r = authPost("/api/actions/projects/" + m_atProjectId +
-                                  "/task-types/" + ttId + "/assets/create-tasks",
-                              "{}");
-  connect(r, &QNetworkReply::finished, this, [this, r]() {
+                             .arg(m_atCreateList.size()));
+  QNetworkReply *r = authPost("/api/data/tasks",
+                              newTaskBody(m_atProjectId, assetId, ttId));
+  const int qi = m_atCreateList[m_atCreateIdx];
+  connect(r, &QNetworkReply::finished, this, [this, r, assetId, ttId, qi]() {
     r->deleteLater();
     const QByteArray b = r->readAll();
     if (r->error() != QNetworkReply::NoError) { atFail(errorMessage(r, b)); return; }
+    // As for shots: a created task starts at Todo, and so does its base.
+    m_atQueue[qi].expected   = TaskStatus::Todo;
+    m_atQueue[qi].createOnly = m_atQueue[qi].status == TaskStatus::Todo;
+    ZtoryTaskFlow::markSynced(ZtoryTaskFlow::Entity::Asset, m_atQueue[qi].uuid,
+                              m_atQueue[qi].taskType, TaskStatus::Todo);
+    const QJsonObject o = QJsonDocument::fromJson(b).object();
+    const QString key   = assetId + "/" + ttId;
+    m_atTaskIdByKey.insert(key, o.value("id").toString());
+    m_atStatusByKey.insert(key, o.value("task_status_id").toString());
+    m_atAssigneesByKey.insert(key, QSet<QString>());
     ++m_atCreateIdx;
     atCreateNext();
   });
@@ -1449,7 +1533,21 @@ void KitsuClient::atLoadTasks() {
         assignees.insert(a.toString());
       m_atAssigneesByKey.insert(key, assignees);
     }
-    atApplyNext();
+    // The tasks this push needs and Kitsu lacks: exactly these assets,
+    // exactly these types.
+    QSet<QString> queued;
+    for (int i = 0; i < m_atQueue.size(); ++i) {
+      const KitsuAssetTaskPush &t = m_atQueue[i];
+      const QString ttId    = m_atTtIdByName.value(normalizeTaskType(t.taskType));
+      const QString typeId  = m_atAssetTypeIdByName.value(t.assetType.toLower());
+      const QString assetId = m_atAssetIds.value(typeId + "/" + t.assetName.toLower());
+      if (ttId.isEmpty() || assetId.isEmpty()) continue;
+      const QString key = assetId + "/" + ttId;
+      if (m_atTaskIdByKey.contains(key) || queued.contains(key)) continue;
+      queued.insert(key);
+      m_atCreateList.push_back(i);
+    }
+    atCreateNext();
   });
 }
 
@@ -1461,15 +1559,27 @@ void KitsuClient::atApplyNext() {
     const QString assetId   = m_atAssetIds.value(typeId + "/" + t.assetName.toLower());
     const QString taskId    = m_atTaskIdByKey.value(assetId + "/" + ttId);
     const QString statusId  = statusIdFor(t.status);
-    // Skip anything we couldn't resolve (unknown task-type, asset or status).
-    if (ttId.isEmpty() || assetId.isEmpty() || taskId.isEmpty() ||
-        statusId.isEmpty()) {
+    // Skip anything we couldn't resolve (unknown task-type, asset or status),
+    // and what did not change in Ztoryc since the last sync.
+    if (t.createOnly || ttId.isEmpty() || assetId.isEmpty() ||
+        taskId.isEmpty() || statusId.isEmpty()) {
+      ++m_atApplyIdx;
+      continue;
+    }
+    // Kitsu moved on since the last sync, or has a status Ztoryc does not
+    // know: its status is kept.
+    const QString remoteId = m_atStatusByKey.value(assetId + "/" + ttId);
+    if (remoteId != statusId &&
+        (!isPipelineStatusId(remoteId) || toZtoryStatus(remoteId) != t.expected)) {
+      ++m_atUnchanged;
       ++m_atApplyIdx;
       continue;
     }
     // Already at the target status in Kitsu → don't re-comment (would spam the
     // activity feed and notifications); only touch what actually changed.
-    if (m_atStatusByKey.value(assetId + "/" + ttId) == statusId) {
+    if (remoteId == statusId) {
+      ZtoryTaskFlow::markSynced(ZtoryTaskFlow::Entity::Asset, t.uuid,
+                                t.taskType, t.status);
       ++m_atUnchanged;
       ++m_atApplyIdx;
       continue;
@@ -1482,10 +1592,13 @@ void KitsuClient::atApplyNext() {
     body["comment"]        = "Status synced from Ztoryc";
     QNetworkReply *r = authPost("/api/actions/tasks/" + taskId + "/comment",
                                 QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(r, &QNetworkReply::finished, this, [this, r]() {
+    connect(r, &QNetworkReply::finished, this, [this, r, t]() {
       r->deleteLater();
       const QByteArray b = r->readAll();
       if (r->error() != QNetworkReply::NoError) { atFail(errorMessage(r, b)); return; }
+      ZtoryTaskFlow::markSynced(ZtoryTaskFlow::Entity::Asset, t.uuid, t.taskType,
+                                t.status);
+      ZtoryModel::instance()->saveProjectDb();
       ++m_atStatusesSet;
       ++m_atApplyIdx;
       atApplyNext();
@@ -1922,7 +2035,7 @@ QVector<KitsuPreviewUpload> KitsuClient::buildUploadsFromFolder(
     if (match->kitsuShotId.isEmpty()) { ++outNoId; continue; }
     // Detect the task from the {TASK} short code in the name, limited to this
     // shot's technique; default Storyboard for board/animatic previews.
-    QString task    = "Storyboard";
+    QString task    = ZtoryModel::kStoryboardTask;
     int     codeLen = 0;
     for (const QString &tt : m->taskTypesForProjectShot(*match)) {
       const QString code = ZtoryModel::taskShortCode(tt);
@@ -1977,10 +2090,17 @@ QVector<KitsuShotPush> KitsuClient::buildShotPushFromProject(
       tp.seq = s.seq; tp.shot = s.name; tp.taskType = tt;
       tp.order = ti + 1;
       tp.kitsuShotId = ps.kitsuShotId;
+      tp.uuid        = ps.uuid;
       auto it = ps.tasks.constFind(tt);
       if (it != ps.tasks.constEnd()) {
         tp.status    = it.value().status;
         tp.assignees = it.value().assignees;
+        // Only what changed in Ztoryc since the last sync is sent; the rest
+        // is Kitsu's to say (the push used to undo a supervisor's Done).
+        tp.createOnly = !ZtoryTaskFlow::changedSinceSync(
+            ZtoryTaskFlow::Entity::Shot, ps.uuid, tt);
+        tp.expected = ZtoryTaskFlow::expectedOnServer(
+            ZtoryTaskFlow::Entity::Shot, ps.uuid, tt);
       } else
         tp.createOnly = true;
       outTasks.push_back(tp);
@@ -2006,13 +2126,7 @@ void KitsuClient::uploadPreviews(const QString &projectId,
 
   // Reverse status map (Ztoryc TaskStatus -> Kitsu status id), same six pipeline
   // short names used by the task push, so Wfa/Done/etc. resolve correctly.
-  m_statusIdByZ.clear();
-  for (const KitsuTaskStatus &st : m_taskStatuses) {
-    const QString sn = st.shortName.toLower();
-    if (sn == "todo" || sn == "ready" || sn == "wip" || sn == "wfa" ||
-        sn == "retake" || sn == "done")
-      m_statusIdByZ.insert(static_cast<int>(mapStatus(st)), st.id);
-  }
+  rebuildStatusIdByZ();
   uplProbeLocalThenRun();
 }
 
@@ -2056,12 +2170,7 @@ void KitsuClient::uplLoadTaskTypes() {
     r->deleteLater();
     const QByteArray b = r->readAll();
     if (r->error() != QNetworkReply::NoError) { uplFail(errorMessage(r, b)); return; }
-    for (const QJsonValue &v : QJsonDocument::fromJson(b).array()) {
-      const QJsonObject o = v.toObject();
-      if (o.value("for_entity").toString() == "Shot")
-        m_ttIdByName.insert(o.value("name").toString().toLower(),
-                            o.value("id").toString());
-    }
+    parseShotTaskTypes(b);
     uplLoadTasks();
   });
 }
@@ -2179,13 +2288,13 @@ void KitsuClient::uplAddPreview(const QString &taskId, const QString &commentId,
   });
 }
 
-void KitsuClient::uplUploadFile(const QString &previewFileId,
-                                const QString &filePath) {
+QNetworkReply *KitsuClient::postPreviewFile(const QString &previewFileId,
+                                            const QString &filePath,
+                                            const QString &base) {
   QFile *file = new QFile(filePath);
   if (!file->open(QIODevice::ReadOnly)) {
     delete file;
-    uplFail(tr("Cannot open %1").arg(QFileInfo(filePath).fileName()));
-    return;
+    return nullptr;
   }
   QHttpMultiPart *mp = new QHttpMultiPart(QHttpMultiPart::FormDataType);
   QHttpPart filePart;
@@ -2202,10 +2311,20 @@ void KitsuClient::uplUploadFile(const QString &previewFileId,
   mp->append(filePart);
 
   QNetworkRequest req(
-      (QUrl(uploadBase() + "/api/pictures/preview-files/" + previewFileId)));
+      (QUrl(base + "/api/pictures/preview-files/" + previewFileId)));
   req.setRawHeader("Authorization", "Bearer " + m_accessToken.toUtf8());
   QNetworkReply *r = m_nam->post(req, mp);
   mp->setParent(r);  // multipart (and file) freed with the reply
+  return r;
+}
+
+void KitsuClient::uplUploadFile(const QString &previewFileId,
+                                const QString &filePath) {
+  QNetworkReply *r = postPreviewFile(previewFileId, filePath, uploadBase());
+  if (!r) {
+    uplFail(tr("Cannot open %1").arg(QFileInfo(filePath).fileName()));
+    return;
+  }
   connect(r, &QNetworkReply::finished, this,
           [this, r, previewFileId]() {
     r->deleteLater();
@@ -2261,18 +2380,387 @@ void KitsuClient::onTaskStatusesReply(QNetworkReply *reply) {
   m_statusById.clear();
   const QJsonArray arr = QJsonDocument::fromJson(body).array();
   for (const QJsonValue &v : arr) {
-    const QJsonObject o = v.toObject();
-    KitsuTaskStatus s;
-    s.id                = o.value("id").toString();
-    s.name              = o.value("name").toString();
-    s.shortName         = o.value("short_name").toString();
-    s.color             = o.value("color").toString();
-    s.isDone            = o.value("is_done").toBool();
-    s.isRetake          = o.value("is_retake").toBool();
-    s.isFeedbackRequest = o.value("is_feedback_request").toBool();
-    s.isDefault         = o.value("is_default").toBool();
+    const KitsuTaskStatus s = parseTaskStatus(v.toObject());
     m_taskStatuses.push_back(s);
     m_statusById.insert(s.id, mapStatus(s));
   }
   emit taskStatusesFetched(m_taskStatuses);
 }
+
+//----------------------------------------------------------------------------
+// Safe push of single status changes (Ztoryc, 2026-09-26)
+//
+// The full push writes Ztoryc's status over Kitsu's wherever they differ: run
+// automatically, it would silently undo a Retake a supervisor set a minute
+// ago. Here a change is written only if the task on Kitsu still has the
+// status the change started from. It has its own queue, caches and state, so
+// it cannot corrupt a full push, pull or upload running at the same time.
+//----------------------------------------------------------------------------
+
+void KitsuClient::setAutoPushStatus(bool on) {
+  m_autoPushStatus = on;
+  QSettings().setValue(kGroupAutoPush, on);
+}
+
+void KitsuClient::onTaskTransition(int entity, const QString &uuid,
+                                   const QString &taskType, int from, int to,
+                                   int origin) {
+  if (!m_autoPushStatus || !isLoggedIn()) return;
+  ZtoryModel *m = ZtoryModel::instance();
+  if (!m->useKitsu() || m->kitsuProjectId().isEmpty()) return;
+  QString kitsuId;
+  if (entity == 0) {
+    for (const ProjectShot &ps : m->projectShots())
+      if (ps.uuid == uuid) { kitsuId = ps.kitsuShotId; break; }
+  } else {
+    for (const Asset &a : m->assets())
+      if (a.uuid == uuid) { kitsuId = a.kitsuAssetId; break; }
+  }
+  // Not on Kitsu yet: creating it is the full push's job.
+  if (kitsuId.isEmpty()) return;
+  KitsuTransition t;
+  t.entity        = entity;
+  t.origin        = origin;
+  t.uuid          = uuid;
+  t.kitsuEntityId = kitsuId;
+  t.taskType      = taskType;
+  t.from          = static_cast<TaskStatus>(from);
+  t.to            = static_cast<TaskStatus>(to);
+  pushTransition(t);
+}
+
+void KitsuClient::pushTransition(const KitsuTransition &t) {
+  m_trQueue.append(t);
+  if (m_trBusy) return;
+  // Started from the event loop, not from inside the edit that emitted the
+  // change (possibly halfway through a bulk edit of the tracker).
+  m_trBusy = true;
+  QMetaObject::invokeMethod(this, [this]() { trNext(); }, Qt::QueuedConnection);
+}
+
+// A reply that never comes would leave the queue busy forever, silently.
+static void armTimeout(QNetworkReply *r) {
+  QTimer::singleShot(15000, r, [r]() {
+    if (r->isRunning()) r->abort();
+  });
+}
+
+void KitsuClient::trNext() {
+  if (m_trQueue.isEmpty()) {
+    m_trBusy = false;
+    return;
+  }
+  m_trBusy = true;
+  if (!isLoggedIn()) {
+    trFinish(TrFailed, TaskStatus::Todo, tr("Not logged in to Kitsu."));
+    return;
+  }
+  if (m_trCachesLoaded)
+    trCheckTask();
+  else
+    trLoadCaches([this]() { trCheckTask(); },
+                 [this](const QString &msg) {
+                   trFinish(TrFailed, TaskStatus::Todo, msg);
+                 });
+}
+
+void KitsuClient::mirrorUploadedWfa(const QVector<KitsuPreviewUpload> &uploads) {
+  ZtoryModel *m = ZtoryModel::instance();
+  const int shot = static_cast<int>(ZtoryTaskFlow::Entity::Shot);
+  bool dirty     = false;
+  for (const KitsuPreviewUpload &u : uploads) {
+    if (m->taskStatusOf(shot, u.uuid, u.taskType) != TaskStatus::Wfa &&
+        m->writeTaskStatus(shot, u.uuid, u.taskType, TaskStatus::Wfa))
+      dirty = true;
+    if (m->setTaskSynced(shot, u.uuid, u.taskType, TaskStatus::Wfa))
+      dirty = true;
+  }
+  if (dirty) m->saveAndNotifyTasks();
+}
+
+bool KitsuClient::isPipelineStatusId(const QString &statusId) const {
+  if (statusId.isEmpty()) return true;  // no task yet: nothing to protect
+  for (auto it = m_statusIdByZ.constBegin(); it != m_statusIdByZ.constEnd(); ++it)
+    if (it.value() == statusId) return true;
+  return false;
+}
+
+QString KitsuClient::trTypeKey(int entity, const QString &taskType) {
+  return QString(entity == 0 ? "shot/" : "asset/") + normalizeTaskType(taskType);
+}
+
+// Task types and statuses of the server, loaded once into caches of this
+// machine alone (the full push clears and refills its own).
+void KitsuClient::trLoadCaches(std::function<void()> onDone,
+                               std::function<void(const QString &)> onFail) {
+  QNetworkReply *r = m_nam->get(authGet("/api/data/task-types"));
+  armTimeout(r);
+  connect(r, &QNetworkReply::finished, this, [this, r, onDone, onFail]() {
+    r->deleteLater();
+    const QByteArray b = r->readAll();
+    if (r->error() != QNetworkReply::NoError) {
+      onFail(errorMessage(r, b));
+      return;
+    }
+    m_trTaskTypeId.clear();
+    for (const QJsonValue &v : QJsonDocument::fromJson(b).array()) {
+      const QJsonObject o = v.toObject();
+      const int kind =
+          o.value("for_entity").toString() == QLatin1String("Shot") ? 0 : 1;
+      m_trTaskTypeId.insert(trTypeKey(kind, o.value("name").toString()),
+                            o.value("id").toString());
+    }
+    QNetworkReply *r2 = m_nam->get(authGet("/api/data/task-status"));
+    armTimeout(r2);
+    connect(r2, &QNetworkReply::finished, this, [this, r2, onDone, onFail]() {
+      r2->deleteLater();
+      const QByteArray b2 = r2->readAll();
+      if (r2->error() != QNetworkReply::NoError) {
+        onFail(errorMessage(r2, b2));
+        return;
+      }
+      m_trStatusById.clear();
+      m_trStatusIdByZ.clear();
+      for (const QJsonValue &v : QJsonDocument::fromJson(b2).array()) {
+        const KitsuTaskStatus st = parseTaskStatus(v.toObject());
+        const TaskStatus z       = mapStatus(st);
+        m_trStatusById.insert(st.id, z);
+        if (isPipelineShortName(st.shortName))
+          m_trStatusIdByZ.insert(static_cast<int>(z), st.id);
+      }
+      m_trCachesLoaded = true;
+      onDone();
+    });
+  });
+}
+
+void KitsuClient::trCheckTask() {
+  const KitsuTransition t = m_trQueue.first();
+  const QString ttId = m_trTaskTypeId.value(trTypeKey(t.entity, t.taskType));
+  if (ttId.isEmpty()) {
+    trFinish(TrNoTask, TaskStatus::Todo,
+             tr("Task type «%1» is not on Kitsu.").arg(t.taskType));
+    return;
+  }
+  QNetworkReply *r = m_nam->get(authGet("/api/data/tasks?entity_id=" +
+                                        t.kitsuEntityId +
+                                        "&task_type_id=" + ttId));
+  armTimeout(r);
+  connect(r, &QNetworkReply::finished, this, [this, r, t]() {
+    r->deleteLater();
+    const QByteArray b = r->readAll();
+    if (r->error() != QNetworkReply::NoError) {
+      trFinish(TrFailed, TaskStatus::Todo, errorMessage(r, b));
+      return;
+    }
+    const QJsonArray arr = QJsonDocument::fromJson(b).array();
+    if (arr.isEmpty()) {
+      trFinish(TrNoTask, TaskStatus::Todo,
+               tr("No «%1» task on Kitsu for this entity.").arg(t.taskType));
+      return;
+    }
+    const QJsonObject task = arr.first().toObject();
+    const QString statusIdNow = task.value("task_status_id").toString();
+    // A status created on the server after the caches were loaded: reading
+    // it as Todo would let a Todo→X change overwrite it. Reload next time.
+    if (!m_trStatusById.contains(statusIdNow)) {
+      m_trCachesLoaded = false;
+      trFinish(TrFailed, TaskStatus::Todo,
+               tr("Unknown status on Kitsu: change not sent."));
+      return;
+    }
+    // Compared as Ztoryc statuses, not as ids: «approved» and «done» are both
+    // Done here, and must not count as a difference.
+    const TaskStatus cur = m_trStatusById.value(statusIdNow);
+    if (cur == t.to) {
+      trFinish(TrAlreadyThere, cur, QString());
+      return;
+    }
+    if (cur != t.from) {
+      trFinish(TrConflict, cur,
+               tr("«%1» was changed on Kitsu meanwhile: Kitsu's status kept.")
+                   .arg(t.taskType));
+      return;
+    }
+    const QString statusId = m_trStatusIdByZ.value(static_cast<int>(t.to));
+    if (statusId.isEmpty()) {
+      trFinish(TrFailed, cur, tr("Kitsu has no matching status."));
+      return;
+    }
+    QJsonObject body;
+    body["task_status_id"] = statusId;
+    body["comment"]        = "Status from Ztoryc";
+    QNetworkReply *p =
+        authPost("/api/actions/tasks/" + task.value("id").toString() +
+                     "/comment",
+                 QJsonDocument(body).toJson(QJsonDocument::Compact));
+    armTimeout(p);
+    connect(p, &QNetworkReply::finished, this, [this, p, cur]() {
+      p->deleteLater();
+      const QByteArray pb = p->readAll();
+      if (p->error() != QNetworkReply::NoError) {
+        trFinish(TrFailed, cur, errorMessage(p, pb));
+        return;
+      }
+      trFinish(TrPushed, cur, QString());
+    });
+  });
+}
+
+// «SH010 · Layout» / «BRONTOLO · Rigging»: what the message is about.
+static QString transitionLabel(const KitsuTransition &t) {
+  const ZtoryModel *m = ZtoryModel::instance();
+  QString name;
+  if (t.entity == 0) {
+    for (const ProjectShot &ps : m->projectShots())
+      if (ps.uuid == t.uuid) { name = ps.label; break; }
+  } else {
+    for (const Asset &a : m->assets())
+      if (a.uuid == t.uuid) { name = a.name; break; }
+  }
+  return name.isEmpty() ? t.taskType : name + " · " + t.taskType;
+}
+
+void KitsuClient::trFinish(TransitionResult r, TaskStatus server,
+                           const QString &msg) {
+  const KitsuTransition t = m_trQueue.takeFirst();
+  const bool sent = (r == TrPushed || r == TrAlreadyThere);
+  const auto ent  = static_cast<ZtoryTaskFlow::Entity>(t.entity);
+  // The base follows what Kitsu now has: the change, or its own status.
+  if (sent) {
+    ZtoryTaskFlow::markSynced(ent, t.uuid, t.taskType, t.to);
+    ZtoryModel::instance()->saveProjectDb();
+  }
+  // Kitsu wins: the local status takes the server's, as a pull would.
+  if (r == TrConflict) {
+    ZtoryTaskFlow::markSynced(ent, t.uuid, t.taskType, server);
+    ZtoryTaskFlow::applyFromServer(ent, t.uuid, t.taskType, server);
+  }
+  // What this change CAUSED in Ztoryc (a Done readies the next task) was
+  // queued right behind it. If the change did not reach Kitsu, sending those
+  // would write «next task Ready» next to a Retake the supervisor just set.
+  // They are dropped; after a conflict they are also taken back locally.
+  if (!sent) {
+    for (int i = 0; i < m_trQueue.size();) {
+      const KitsuTransition &q = m_trQueue[i];
+      if (q.uuid == t.uuid && q.entity == t.entity &&
+          q.origin == static_cast<int>(ZtoryTaskFlow::Origin::App)) {
+        if (r == TrConflict)
+          ZtoryTaskFlow::applyFromServer(
+              static_cast<ZtoryTaskFlow::Entity>(q.entity), q.uuid,
+              q.taskType, q.from);
+        m_trQueue.removeAt(i);
+      } else {
+        ++i;
+      }
+    }
+  }
+  emit transitionPushed(t.entity, t.uuid, t.taskType, r,
+                        static_cast<int>(server),
+                        msg.isEmpty() ? msg
+                                      : transitionLabel(t) + ": " + msg);
+  // Next from the event loop: a long queue must not deepen the stack.
+  QMetaObject::invokeMethod(this, [this]() { trNext(); }, Qt::QueuedConnection);
+}
+
+//----------------------------------------------------------------------------
+// Review preview: one file, on one task, in a comment that sets the status
+// (Ztoryc, 2026-09-26 — the character's WFA with its preview). On the safe
+// push's caches: the clip upload knows only the SHOT task types, and a rig's
+// «Rigging» is an asset one.
+//----------------------------------------------------------------------------
+
+int KitsuClient::uploadReviewPreview(int entity, const QString &kitsuEntityId,
+                                     const QString &taskType,
+                                     const QString &filePath,
+                                     TaskStatus status) {
+  const int token = ++m_revToken;
+  auto fail = [this, token](const QString &msg) {
+    emit reviewPreviewUploaded(token, false, msg);
+  };
+  // The steps, once the caches are there.
+  auto run = [this, token, fail, entity, kitsuEntityId, taskType, filePath,
+              status]() {
+    const QString ttId     = m_trTaskTypeId.value(trTypeKey(entity, taskType));
+    const QString statusId = m_trStatusIdByZ.value(static_cast<int>(status));
+    if (ttId.isEmpty()) {
+      fail(tr("Task type «%1» is not on Kitsu.").arg(taskType));
+      return;
+    }
+    if (statusId.isEmpty()) {
+      fail(tr("Kitsu has no matching status."));
+      return;
+    }
+    QNetworkReply *r = m_nam->get(authGet("/api/data/tasks?entity_id=" +
+                                          kitsuEntityId + "&task_type_id=" +
+                                          ttId));
+    armTimeout(r);
+    connect(r, &QNetworkReply::finished, this, [=]() {
+      r->deleteLater();
+      const QByteArray b = r->readAll();
+      if (r->error() != QNetworkReply::NoError) { fail(errorMessage(r, b)); return; }
+      const QJsonArray arr = QJsonDocument::fromJson(b).array();
+      if (arr.isEmpty()) {
+        fail(tr("No «%1» task on Kitsu.").arg(taskType));
+        return;
+      }
+      const QString taskId = arr.first().toObject().value("id").toString();
+      QJsonObject body;
+      body["task_status_id"] = statusId;
+      body["comment"]        = tr("Preview for approval, from Ztoryc");
+      QNetworkReply *c = authPost("/api/actions/tasks/" + taskId + "/comment",
+                                  QJsonDocument(body).toJson(QJsonDocument::Compact));
+      armTimeout(c);
+      connect(c, &QNetworkReply::finished, this, [=]() {
+        c->deleteLater();
+        const QByteArray cb = c->readAll();
+        if (c->error() != QNetworkReply::NoError) { fail(errorMessage(c, cb)); return; }
+        const QString cid = QJsonDocument::fromJson(cb).object().value("id").toString();
+        if (cid.isEmpty()) { fail(tr("Kitsu did not return a comment id.")); return; }
+        QNetworkReply *a = authPost("/api/actions/tasks/" + taskId + "/comments/" +
+                                        cid + "/add-preview",
+                                    QByteArray("{}"));
+        armTimeout(a);
+        connect(a, &QNetworkReply::finished, this, [=]() {
+          a->deleteLater();
+          const QByteArray ab = a->readAll();
+          if (a->error() != QNetworkReply::NoError) { fail(errorMessage(a, ab)); return; }
+          const QJsonObject o = QJsonDocument::fromJson(ab).object();
+          QString pid = o.value("id").toString();
+          if (pid.isEmpty()) pid = o.value("preview_file_id").toString();
+          if (pid.isEmpty()) { fail(tr("Kitsu did not return a preview id.")); return; }
+          QNetworkReply *f = postPreviewFile(pid, filePath, m_baseUrl);
+          if (!f) {
+            fail(tr("Cannot open %1").arg(QFileInfo(filePath).fileName()));
+            return;
+          }
+          armTimeout(f);
+          connect(f, &QNetworkReply::finished, this, [=]() {
+            f->deleteLater();
+            const QByteArray fb = f->readAll();
+            if (f->error() != QNetworkReply::NoError) { fail(errorMessage(f, fb)); return; }
+            // The asset's cover shows the latest rig; best effort.
+            QJsonObject mb;
+            mb["frame_number"] = 0;
+            QNetworkReply *mp = authPut(
+                "/api/actions/preview-files/" + pid + "/set-main-preview",
+                QJsonDocument(mb).toJson(QJsonDocument::Compact));
+            connect(mp, &QNetworkReply::finished, mp, &QObject::deleteLater);
+            emit reviewPreviewUploaded(token, true, QString());
+          });
+        });
+      });
+    });
+  };
+  if (!isLoggedIn()) {
+    QMetaObject::invokeMethod(
+        this, [fail]() { fail(tr("Not logged in to Kitsu.")); },
+        Qt::QueuedConnection);
+  } else if (m_trCachesLoaded) {
+    QMetaObject::invokeMethod(this, run, Qt::QueuedConnection);
+  } else {
+    trLoadCaches(run, fail);
+  }
+  return token;
+}
+

@@ -1,5 +1,6 @@
 #include "storyboardpanel.h"
 #include "ztoryshotops.h"
+#include "ztorytaskflow.h"
 #include "xsheetdragtool.h"  // XsheetGUI::setPlayRange
 #include "ztoryanimatic.h"   // ZtoryAnimaticController::invalidateSoundTrack
 #include "ztorylightgizmo.h"
@@ -1017,7 +1018,7 @@ static void ztoryOfferSpeakerAlias(QWidget *parent, QTextEdit *field,
     QHash<QAction *, QString> byAction;
     const QString curAlias = m->speakerAlias(sel);
     for (const Asset &a : m->assets()) {
-      if (a.type.compare("Character", Qt::CaseInsensitive) != 0) continue;
+      if (!ZtoryModel::isCharacterType(a.type)) continue;
       QAction *act = sub->addAction(a.name);
       act->setCheckable(true);
       act->setChecked(!curAlias.isEmpty() && curAlias == a.uuid);
@@ -3763,22 +3764,14 @@ void StoryboardPanel::loadZtoryc() {
         ZtoryModel *m = ZtoryModel::instance();
         m->loadProjectDbFromPath(m_shotBackLinkProject);
         if (!m_shotBackLinkUuid.isEmpty()) {
-          for (ProjectShot &ps : m->projectShots_rw()) {
+          // The WIP of the task being worked on is set by
+          // ZtoryModel::onSceneSwitchedAdvanceShot → ZtoryTaskFlow::shotOpened.
+          // This used to do it too, on the chain's FIRST task — Storyboard —
+          // and put a finished storyboard back to WIP (2026-09-26).
+          for (const ProjectShot &ps : m->projectShots()) {
             if (ps.uuid != m_shotBackLinkUuid) continue;
-            QStringList tts;
-            QString tech = ps.technique.isEmpty() ? m->defaultTechnique()
-                                                  : ps.technique;
-            shotTech = tech;
-            if (const Technique *t = m->findTechnique(tech)) tts = t->taskTypes;
-            if (!tts.isEmpty()) {
-              TaskState &ts = ps.tasks[tts.first()];
-              if (ts.status == TaskStatus::Todo ||
-                  ts.status == TaskStatus::Ready) {
-                ts.status = TaskStatus::Wip;
-                m->saveProjectDb();
-                emit m->taskStatusChanged();
-              }
-            }
+            shotTech = ps.technique.isEmpty() ? m->defaultTechnique()
+                                              : ps.technique;
             break;
           }
         }
@@ -7393,21 +7386,27 @@ QList<TFilePath> StoryboardPanel::exportShotScenesToDir(
         f.close();
       }
 
-      // Export = the storyboard is locked in: mark Storyboard Done and advance
-      // the first production task (usually Layout) Todo→Ready; later tasks stay
-      // Todo until each predecessor is approved.
+      // Export = the storyboard is locked in: Storyboard goes Done, and
+      // ZtoryTaskFlow readies the next task (usually Layout). A storyboard
+      // already in review (WFA) is left there: approving it is a person's
+      // call. With no Storyboard task, the first production task goes Ready.
       QStringList tts;
       if (const Technique *t = model->findTechnique(tech)) tts = t->taskTypes;
-      const QString firstProd = model->firstProductionTaskType(tech);
-      for (ProjectShot &ps : model->projectShots_rw()) {
-        if (ps.uuid != sd.uuid) continue;
-        if (tts.contains("Storyboard"))
-          ps.tasks["Storyboard"].status = TaskStatus::Done;
-        if (!firstProd.isEmpty()) {
-          TaskState &st = ps.tasks[firstProd];
-          if (st.status == TaskStatus::Todo) st.status = TaskStatus::Ready;
-        }
-        break;
+      // The chain's own spelling: a technique pulled from Kitsu may say
+      // «storyboard», and the key must be the one the chain uses.
+      QString storyboardTask;
+      for (const QString &tt : tts)
+        if (ZtoryModel::isStoryboardTask(tt)) { storyboardTask = tt; break; }
+      if (!storyboardTask.isEmpty()) {
+        ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Shot, sd.uuid,
+                                 storyboardTask, TaskStatus::Done,
+                                 ZtoryTaskFlow::Origin::App, /*batch=*/true);
+      } else {
+        const QString firstProd = model->firstProductionTaskType(tech);
+        if (!firstProd.isEmpty())
+          ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Shot, sd.uuid,
+                                   firstProd, TaskStatus::Ready,
+                                   ZtoryTaskFlow::Origin::App, /*batch=*/true);
       }
     }
   }
@@ -8734,18 +8733,7 @@ void StoryboardPanel::onExportAnimatic() {
     } else {
       // Optimistic local WFA mirror (the upload sets WFA on Kitsu too; a later
       // pull reconciles if an upload fails).
-      auto &pshots = ZtoryModel::instance()->projectShots_rw();
-      bool dirty = false;
-      for (const KitsuPreviewUpload &u : uploads)
-        for (ProjectShot &ps : pshots)
-          if (ps.uuid == u.uuid) {
-            if (ps.tasks[u.taskType].status != TaskStatus::Wfa) {
-              ps.tasks[u.taskType].status = TaskStatus::Wfa;
-              dirty = true;
-            }
-            break;
-          }
-      if (dirty) ZtoryModel::instance()->saveAndNotifyTasks();
+      KitsuClient::mirrorUploadedWfa(uploads);
       KitsuClient::instance()->uploadPreviews(
           ZtoryModel::instance()->kitsuProjectId(), uploads);
       QMessageBox::information(
@@ -9289,17 +9277,7 @@ void StoryboardPanel::onExportSpreadsheet() {
     if (usedSet.count(tt)) { taskCols << tt; usedSet.erase(tt); }
   for (const QString &tt : usedSet) taskCols << tt;  // custom types last
 
-  auto statusColor = [](TaskStatus s) -> QColor {
-    switch (s) {
-    case TaskStatus::Ready:  return QColor("#FBC02D");  // amber  (Kitsu)
-    case TaskStatus::Wip:    return QColor("#3273DC");  // blue   (Kitsu)
-    case TaskStatus::Wfa:    return QColor("#AB26FF");  // purple (Kitsu)
-    case TaskStatus::Retake: return QColor("#FF3860");  // red    (Kitsu)
-    case TaskStatus::Done:   return QColor("#22D160");  // green  (Kitsu)
-    case TaskStatus::Todo:
-    default:                 return QColor("#9E9E9E");  // grey
-    }
-  };
+  const auto statusColor = &ZtoryModel::taskStatusColor;  // shared palette
 
   Document xlsx;
 
@@ -9332,9 +9310,7 @@ void StoryboardPanel::onExportSpreadsheet() {
   naFmt.setPatternBackgroundColor(QColor("#F0F0F0"));
 
   const QString statusList = "\"TODO,READY,WIP,WFA,RETAKE,DONE\"";
-  const TaskStatus allStatuses[] = {TaskStatus::Todo,   TaskStatus::Ready,
-                                    TaskStatus::Wip,    TaskStatus::Wfa,
-                                    TaskStatus::Retake, TaskStatus::Done};
+  const QVector<TaskStatus> &allStatuses = ZtoryModel::allTaskStatuses();
 
   // Writes one (already-current) sheet: title, header, one row per shot in
   // shotIdxs, then status dropdowns + colour-by-value CF + auto-filter.

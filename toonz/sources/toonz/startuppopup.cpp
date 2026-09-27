@@ -6,6 +6,7 @@
 #include "mainwindow.h"
 #include "tapp.h"
 #include "iocommand.h"
+#include "ztoryassetimport.h"
 #include "toutputproperties.h"
 #include "toonzqt/flipconsole.h"
 #include "menubarcommandids.h"
@@ -14,6 +15,7 @@
 #include "projectpopup.h"
 #include "ztorymodel.h"
 #include "ztorycharacter.h"
+#include "ztorytaskflow.h"
 #include "ztorystartup.h"
 #include "columncommand.h"
 
@@ -546,7 +548,7 @@ StartupPopup::StartupPopup(Mode mode)
                   m_characterCB->setCurrentIndex(0);
                   return;
                 }
-                ZtoryModel::instance()->addAsset("Character", name.trimmed());
+                ZtoryModel::instance()->addAsset(ZtoryModel::kCharacterType, name.trimmed());
                 // Su disco SUBITO: refreshCharacterChoices() rilegge il
                 // production.ztrack, e un asset rimasto solo in memoria
                 // sparirebbe proprio mentre lo si sceglie.
@@ -1166,7 +1168,7 @@ void StartupPopup::refreshCharacterChoices() {
   m_characterCB->blockSignals(true);
   m_characterCB->clear();
   for (const Asset &a : ZtoryModel::instance()->assets())
-    if (a.type.compare("Character", Qt::CaseInsensitive) == 0) {
+    if (ZtoryModel::isCharacterType(a.type)) {
       // Un personaggio che ha GIA' la sua scena non si offre di nuovo: una
       // seconda scena dello stesso personaggio ruberebbe il collegamento alla
       // prima (Franco, 2026-09-25). Conta il file vero, non il solo legame:
@@ -1183,6 +1185,25 @@ void StartupPopup::refreshCharacterChoices() {
 }
 
 //-----------------------------------------------------------------------------
+
+// Ztoryc: il PSD da riggare collegato al personaggio entra da solo nella sua
+// scena appena creata, con le opzioni PSD del personaggio (o quelle di
+// progetto dove non le ha): e' il passo che prima si faceva a mano ogni volta
+// (Franco, 2026-09-26). Nessun PSD collegato, o file sparito: non fa niente
+// e lo dice, perche' una scena del personaggio vuota deve avere un perche'.
+static void importCharacterRigPsd(const Asset &a) {
+  ZtoryModel *m     = ZtoryModel::instance();
+  const QString psd = m->resolveAssetRigPsd(a);
+  if (psd.isEmpty()) return;
+  if (!QFileInfo::exists(psd)) {
+    DVGui::warning(QObject::tr("The PSD to rig of %1 was not found:\n%2")
+                       .arg(a.name, psd));
+    return;
+  }
+  ztoryLoadPsdWithPolicy(
+      TFilePath(psd.toStdWString()), m->effectiveImportPolicy(a),
+      TApp::instance()->getCurrentXsheet()->getXsheet()->getColumnCount());
+}
 
 void StartupPopup::onCreateButton() {
   // In modalita' Character il nome della scena E' il personaggio scelto: non si
@@ -1316,24 +1337,10 @@ void StartupPopup::onCreateButton() {
           m->setAssetFilePath(i, tnz);
           // Creare la scena del personaggio E' cominciare il suo rig: il task
           // Rigging passa a WIP (Franco, 2026-09-25). Solo in avanti: uno gia'
-          // in revisione o chiuso non si riporta indietro. Il nome si cerca
-          // senza badare alle maiuscole — nei progetti tirati da Kitsu convivono
-          // «Rigging» e «rigging» — ma si scrive quello del tipo Character.
-          {
-            QString rigTask;
-            for (const QString &tt :
-                 m->assetTaskTypesForType(m->assets()[i].type))
-              if (tt.compare("Rigging", Qt::CaseInsensitive) == 0) {
-                rigTask = tt;
-                break;
-              }
-            if (!rigTask.isEmpty()) {
-              const TaskStatus cur =
-                  m->assets()[i].tasks.value(rigTask).status;
-              if (cur == TaskStatus::Todo || cur == TaskStatus::Ready)
-                m->setAssetTaskStatus(i, rigTask, TaskStatus::Wip);
-            }
-          }
+          // in revisione o chiuso non si riporta indietro — la regola sta in
+          // ZtoryTaskFlow, con le altre.
+          ZtoryTaskFlow::characterSceneCreated(characterUuid);
+          importCharacterRigPsd(m->assets()[i]);
           // Gli asset vivono in production.ztrack, non nel .ztoryc: senza
           // questo il collegamento resterebbe solo in memoria e sparirebbe
           // alla chiusura — e il personaggio si ritroverebbe scollegato senza

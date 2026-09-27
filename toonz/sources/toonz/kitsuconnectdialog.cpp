@@ -298,7 +298,7 @@ void KitsuConnectDialog::onLinkClicked() {
   m->saveProjectDb();
 
   // Pull the project's team right away so the assignee picker is populated
-  // (the Production panel handles teamPulled and merges it into the roster).
+  // (ZtoryKitsuSync applies teamPulled and merges it into the roster).
   m_client->pullTeam(sel.id);
 
   m_statusLabel->setStyleSheet("color:#22D160;");

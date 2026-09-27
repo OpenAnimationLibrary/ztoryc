@@ -61,16 +61,14 @@ class ZtoryProductionPanel final : public TPanel {
   //! revisitable.
   QCheckBox    *m_useKitsuCheck   = nullptr;
   QGroupBox    *m_kitsuGroup      = nullptr;
-  QPushButton  *m_kitsuPushBtn   = nullptr;
-  QPushButton  *m_kitsuPullBtn   = nullptr;
   QPushButton  *m_kitsuUploadBtn = nullptr;
-  QPushButton  *m_kitsuPushAssetsBtn = nullptr;
-  QPushButton  *m_kitsuPullAssetsBtn = nullptr;
+  // Ztoryc: the one Sync button (2026-09-27, Franco: «un unico tasto»). The
+  // Sync itself is ZtoryKitsuSync; the tracker shows it.
+  QPushButton  *m_kitsuSyncBtn = nullptr;
+  void onKitsuSync();
   QCheckBox    *m_kitsuHandlesCheck = nullptr;
   QSpinBox     *m_kitsuHandlesSpin  = nullptr;
   QLabel       *m_kitsuSyncLabel = nullptr;
-  QVector<KitsuTaskPush> m_kitsuPendingTasks;  // pushed right after the shots land
-  QVector<KitsuAssetTaskPush> m_kitsuPendingAssetTasks;  // pushed after assets land
   // Assets tab
   QTableWidget *m_assetTable = nullptr;
   QStringList   m_assetTaskCols;
@@ -109,11 +107,7 @@ private:
   void reloadProjectTab();         // model → fields
   void applyProjectFromFields();   // fields → model + persist
   // Kitsu sync actions (Project tab); enabled only when the project is linked.
-  void onKitsuPush();              // push shots + task statuses to Kitsu
-  void onKitsuPull();              // pull task statuses (review sync) from Kitsu
   void onKitsuUpload();            // upload per-shot clips from a chosen folder
-  void onKitsuPushAssets();        // push the asset list to Kitsu
-  void onKitsuPullAssets();        // import Kitsu-authored assets into the tracker
   void updateKitsuButtons();       // enable/disable sync buttons by link state
   // Assets tab
   QWidget *buildAssetsTab();
@@ -135,6 +129,8 @@ private:
   // scheda Breakdown: due copie divergono, e la seconda dimentica il
   // filtro .tnz dei personaggi.
   bool linkAssetFileInteractive(int assetIndex);
+  // Il PSD da riggare di un personaggio (importato alla creazione della sua scena).
+  bool linkAssetRigPsdInteractive(int assetIndex);
   // Opzioni PSD di UN asset. Registra solo cio' che differisce dal
   // default di progetto, cosi' cambiare il default continua ad arrivare
   // qui: salvare anche i campi uguali li congelerebbe.

@@ -136,7 +136,7 @@ bool askCharacter(QWidget *parent, QString *uuid, QString *name) {
   auto *combo = new QComboBox(&dlg);
   for (int i = 0; i < m->assetCount(); i++) {
     const Asset &a = m->assets()[i];
-    if (a.type.compare("Character", Qt::CaseInsensitive) != 0) continue;
+    if (!ZtoryModel::isCharacterType(a.type)) continue;
     combo->addItem(a.name, a.uuid);
   }
   // L'aggiunta a mano non e' un ripiego: il personaggio disegnato adesso, che
@@ -159,7 +159,7 @@ bool askCharacter(QWidget *parent, QString *uuid, QString *name) {
     if (!ok || nm.trimmed().isEmpty()) return false;
     // Registrato fra gli asset: cosi' la volta dopo e' in elenco, e il suo set
     // di bocche puo' agganciarsi a lui invece di restare orfano.
-    m->addAsset("Character", nm.trimmed());
+    m->addAsset(ZtoryModel::kCharacterType, nm.trimmed());
     *name = nm.trimmed();
     *uuid =
         m->assetCount() > 0 ? m->assets()[m->assetCount() - 1].uuid : QString();

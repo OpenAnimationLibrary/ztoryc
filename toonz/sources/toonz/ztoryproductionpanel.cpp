@@ -9,6 +9,8 @@
 #include "toonzqt/gutil.h"
 #include "toonzqt/dvdialog.h"
 #include "ztorycharacter.h"  // declareCharacterScene
+#include "ztorytaskflow.h"
+#include "ztorykitsusync.h"
 
 #include "tundo.h"
 #include "tapp.h"
@@ -76,28 +78,15 @@ QString frameToTimecode(int frame1Based, int fps) {
       .arg(f % fps,       2, 10, QChar('0'));
 }
 
-// Canonical Kitsu palette (matches the live Kitsu task_status colours):
-// Todo grey, Ready amber, WIP blue, WFA purple, Retake red, Done green.
-QColor statusColor(TaskStatus s) {
-  switch (s) {
-  case TaskStatus::Ready:  return QColor("#FBC02D");  // amber
-  case TaskStatus::Wip:    return QColor("#3273DC");  // blue
-  case TaskStatus::Wfa:    return QColor("#AB26FF");  // purple
-  case TaskStatus::Retake: return QColor("#FF3860");  // red
-  case TaskStatus::Done:   return QColor("#22D160");  // green
-  case TaskStatus::Todo:
-  default:                 return QColor("#9E9E9E");  // grey
-  }
-}
+// The palette lives in the model, shared with the Board's export.
+QColor statusColor(TaskStatus s) { return ZtoryModel::taskStatusColor(s); }
 
 // Light statuses read better with black text.
 bool isLightStatus(TaskStatus s) {
   return s == TaskStatus::Todo || s == TaskStatus::Ready;
 }
 
-const TaskStatus kAllStatuses[] = {TaskStatus::Todo,  TaskStatus::Ready,
-                                   TaskStatus::Wip,   TaskStatus::Wfa,
-                                   TaskStatus::Retake, TaskStatus::Done};
+const QVector<TaskStatus> &kAllStatuses = ZtoryModel::allTaskStatuses();
 
 // Persist the .ztoryc through the Board (the in-app source of truth lives in
 // the model; the Board owns the save path). No-op if the Board is closed —
@@ -279,20 +268,30 @@ TaskEditResult pickTaskEdit(QWidget *parent, const QString &taskType,
 
 // Undo for project-shot task edits — keyed by stable shot uuid (survives
 // reordering and cross-storyboard aggregation). Persists to project DB.
+// Ztoryc: it keeps every change the edit made — a Done also readies the next
+// task — and takes them all back, so ⌘Z does not leave that Ready behind.
 class ProjectShotStatusUndo final : public TUndo {
   QString    m_uuid, m_taskType;
   TaskStatus m_old, m_new;
+  mutable QVector<ZtoryTaskFlow::Change> m_changes;
 public:
   ProjectShotStatusUndo(const QString &uuid, const QString &taskType,
-                        TaskStatus o, TaskStatus n)
-      : m_uuid(uuid), m_taskType(taskType), m_old(o), m_new(n) {}
+                        TaskStatus o, TaskStatus n,
+                        const QVector<ZtoryTaskFlow::Change> &changes)
+      : m_uuid(uuid), m_taskType(taskType), m_old(o), m_new(n),
+        m_changes(changes) {}
   void undo() const override {
-    ZtoryModel::instance()->setProjectShotTaskStatusByUuid(m_uuid, m_taskType, m_old);
+    ZtoryTaskFlow::revert(m_changes);
     persistProjectDb();
+    emit ZtoryModel::instance()->taskStatusChanged();
   }
   void redo() const override {
-    ZtoryModel::instance()->setProjectShotTaskStatusByUuid(m_uuid, m_taskType, m_new);
+    m_changes.clear();
+    ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Shot, m_uuid, m_taskType,
+                             m_new, ZtoryTaskFlow::Origin::User,
+                             /*batch=*/true, &m_changes);
     persistProjectDb();
+    emit ZtoryModel::instance()->taskStatusChanged();
   }
   int getSize() const override { return sizeof(*this); }
   QString getHistoryString() override {
@@ -322,19 +321,28 @@ public:
 };
 
 // Undo for asset task edits — keyed by the asset's stable uuid.
+// Ztoryc: like ProjectShotStatusUndo, it takes back the changes the edit caused.
 class AssetStatusUndo final : public TUndo {
   QString m_uuid, m_taskType;
   TaskStatus m_old, m_new;
+  mutable QVector<ZtoryTaskFlow::Change> m_changes;
 public:
-  AssetStatusUndo(const QString &uuid, const QString &type, TaskStatus o, TaskStatus n)
-      : m_uuid(uuid), m_taskType(type), m_old(o), m_new(n) {}
+  AssetStatusUndo(const QString &uuid, const QString &type, TaskStatus o,
+                  TaskStatus n, const QVector<ZtoryTaskFlow::Change> &changes)
+      : m_uuid(uuid), m_taskType(type), m_old(o), m_new(n),
+        m_changes(changes) {}
   void undo() const override {
-    ZtoryModel::instance()->setAssetTaskStatusByUuid(m_uuid, m_taskType, m_old);
+    ZtoryTaskFlow::revert(m_changes);
     persistAssets();
+    emit ZtoryModel::instance()->assetsChanged();
   }
   void redo() const override {
-    ZtoryModel::instance()->setAssetTaskStatusByUuid(m_uuid, m_taskType, m_new);
+    m_changes.clear();
+    ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Asset, m_uuid, m_taskType,
+                             m_new, ZtoryTaskFlow::Origin::User,
+                             /*batch=*/true, &m_changes);
     persistAssets();
+    emit ZtoryModel::instance()->assetsChanged();
   }
   int getSize() const override { return sizeof(*this); }
   QString getHistoryString() override {
@@ -415,262 +423,57 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
   connect(m, &ZtoryModel::assetsChanged,     this, [this] { rebuildAssets(); });
   connect(m, &ZtoryModel::productionReloaded, this, &ZtoryProductionPanel::onModelChanged);
 
-  // --- Kitsu sync result handling (Project tab) ----------------------------
-  // KitsuClient is the app-lifetime singleton; keep these connected so the
-  // tracker's sync buttons report progress and apply results. The logic mirrors
-  // the (now optional) Connect dialog; both are idempotent, and the dialog is
-  // only ever open transiently, so there's no harmful double-handling.
+  // --- Kitsu (Project tab) -------------------------------------------------
+  // What Kitsu sends back is applied by ZtoryKitsuSync, once for the whole
+  // app; the tracker only shows progress and results.
   KitsuClient *kc = KitsuClient::instance();
   connect(kc, &KitsuClient::shotsPushProgress, this, [this](const QString &msg) {
     if (m_kitsuSyncLabel) { m_kitsuSyncLabel->setStyleSheet(QString()); m_kitsuSyncLabel->setText(msg); }
   });
-  connect(kc, &KitsuClient::shotsPushed, this, [this](bool ok, int, int, const QString &msg) {
-    if (ok && !m_kitsuPendingTasks.isEmpty()) {
-      // Rebuild the task list now: shotIdsResolved (emitted just before this)
-      // has stored the Kitsu id of the shots this push CREATED, and the task
-      // push finds shots by id — by name it can't tell apart the "SQ01" of
-      // one episode from another's.
-      int unusedSkipped = 0;
-      KitsuClient::buildShotPushFromProject(0, m_kitsuPendingTasks, unusedSkipped);
-      if (m_kitsuSyncLabel) m_kitsuSyncLabel->setText(msg + tr("  Pushing task statuses…"));
-      KitsuClient::instance()->pushTasks(ZtoryModel::instance()->kitsuProjectId(),
-                                         m_kitsuPendingTasks);
-      m_kitsuPendingTasks.clear();
-      return;
-    }
-    if (m_kitsuSyncLabel) {
-      m_kitsuSyncLabel->setStyleSheet(ok ? "color:#22D160;" : "color:#FF3860;");
-      m_kitsuSyncLabel->setText(msg);
-    }
-    updateKitsuButtons();
-  });
-  connect(kc, &KitsuClient::shotIdsResolved, this, [](const QHash<QString, QString> &byKey) {
-    ZtoryModel *mm = ZtoryModel::instance();
-    auto &pshots = mm->projectShots_rw();
-    bool dirty = false;
-    for (ProjectShot &ps : pshots) {
-      const QString seq = ps.seq.trimmed().isEmpty() ? "SQ01" : ps.seq.trimmed();
-      auto it = byKey.find(seq + "\n" + ps.label.trimmed());
-      if (it != byKey.end() && ps.kitsuShotId != it.value()) { ps.kitsuShotId = it.value(); dirty = true; }
-    }
-    if (dirty) mm->saveProjectDb();
-  });
-  connect(kc, &KitsuClient::tasksPushed, this, [this](bool ok, int, const QString &msg) {
-    if (m_kitsuSyncLabel) {
-      m_kitsuSyncLabel->setStyleSheet(ok ? "color:#22D160;" : "color:#FF3860;");
-      m_kitsuSyncLabel->setText(msg);
-    }
-  });
+  // Ztoryc: say what the automatic push did when it did NOT simply succeed —
+  // above all when Kitsu had moved on and its status was kept.
+  connect(kc, &KitsuClient::transitionPushed, this,
+          [this](int, const QString &, const QString &, int result, int,
+                 const QString &msg) {
+            if (!m_kitsuSyncLabel) return;
+            if (result == KitsuClient::TrPushed ||
+                result == KitsuClient::TrAlreadyThere)
+              return;
+            m_kitsuSyncLabel->setStyleSheet(result == KitsuClient::TrConflict
+                                                ? "color:#FFB000;"
+                                                : "color:#FF3860;");
+            m_kitsuSyncLabel->setText(msg);
+          });
   connect(kc, &KitsuClient::previewsUploaded, this, [this](bool ok, int, const QString &msg) {
     if (m_kitsuSyncLabel) {
       m_kitsuSyncLabel->setStyleSheet(ok ? "color:#22D160;" : "color:#FF3860;");
       m_kitsuSyncLabel->setText(msg);
     }
   });
-  connect(kc, &KitsuClient::statusesPulled, this,
-          [this](bool ok, const QVector<KitsuPullEntry> &entries, const QString &msg) {
-    if (!ok) {
-      if (m_kitsuSyncLabel) { m_kitsuSyncLabel->setStyleSheet("color:#FF3860;"); m_kitsuSyncLabel->setText(msg); }
-      return;
-    }
-    ZtoryModel *mm = ZtoryModel::instance();
-    auto &pshots = mm->projectShots_rw();
-    int updated = 0; bool dirty = false;
-    for (const KitsuPullEntry &e : entries) {
-      const QString ekey = KitsuClient::normalizeTaskType(e.taskType);
-      for (ProjectShot &ps : pshots) {
-        bool match;
-        if (!ps.kitsuShotId.isEmpty() && !e.kitsuShotId.isEmpty())
-          match = (ps.kitsuShotId == e.kitsuShotId);
-        else {
-          const QString psseq = ps.seq.trimmed().isEmpty() ? "SQ01" : ps.seq.trimmed();
-          match = (ps.label.trimmed() == e.shot.trimmed() && psseq == e.seq.trimmed());
-        }
-        if (!match) continue;
-        if (ps.kitsuShotId.isEmpty() && !e.kitsuShotId.isEmpty()) { ps.kitsuShotId = e.kitsuShotId; dirty = true; }
-        for (const QString &tt : mm->taskTypesForProjectShot(ps))
-          if (KitsuClient::normalizeTaskType(tt) == ekey) {
-            if (ps.tasks[tt].status != e.status) { ps.tasks[tt].status = e.status; ++updated; dirty = true; }
-            // Add-only assignee merge (mirrors the add-only push).
-            for (const QString &nm : e.assignees)
-              if (!ps.tasks[tt].assignees.contains(nm)) { ps.tasks[tt].assignees.push_back(nm); dirty = true; }
-            if (e.status == TaskStatus::Done) {
-              const QString nxt = mm->nextTaskType(mm->techniqueForProjectShot(ps), tt);
-              if (!nxt.isEmpty() && ps.tasks.value(nxt).status == TaskStatus::Todo) {
-                ps.tasks[nxt].status = TaskStatus::Ready; dirty = true;
-              }
+  // Ztoryc: the Sync and what Kitsu sends back live in ZtoryKitsuSync
+  // (2026-09-27); here only what the tracker shows.
+  ZtoryKitsuSync *sync = ZtoryKitsuSync::instance();
+  connect(sync, &ZtoryKitsuSync::progress, this, [this](const QString &text) {
+    if (!m_kitsuSyncLabel) return;
+    m_kitsuSyncLabel->setStyleSheet(QString());
+    m_kitsuSyncLabel->setText(text);
+  });
+  connect(sync, &ZtoryKitsuSync::finished, this,
+          [this](bool ok, bool warn, const QString &summary) {
+            if (m_kitsuSyncLabel) {
+              m_kitsuSyncLabel->setStyleSheet(
+                  !ok ? "color:#FF3860;" : warn ? "color:#FFB000;" : "color:#22D160;");
+              m_kitsuSyncLabel->setText(summary);
             }
-            break;
-          }
-      }
-    }
-    if (dirty) mm->saveAndNotifyTasks();
-    if (m_kitsuSyncLabel) {
+            updateKitsuButtons();
+          });
+  connect(sync, &ZtoryKitsuSync::assetTypesChanged, this,
+          [this] { reloadAssetTypesTab(); });
+  connect(sync, &ZtoryKitsuSync::teamChanged, this, [this](int added) {
+    rebuild();
+    if (m_kitsuSyncLabel && !ZtoryKitsuSync::instance()->isRunning()) {
       m_kitsuSyncLabel->setStyleSheet("color:#22D160;");
-      m_kitsuSyncLabel->setText(tr("%1 (%2 updated)").arg(msg).arg(updated));
-    }
-  });
-  // Asset sync results (bidirectional).
-  connect(kc, &KitsuClient::assetIdsResolved, this, [](const QHash<QString, QString> &byKey) {
-    ZtoryModel *mm = ZtoryModel::instance();
-    bool dirty = false;
-    for (Asset &a : mm->assets()) {
-      auto it = byKey.find(a.type + "\n" + a.name.trimmed());
-      if (it != byKey.end() && a.kitsuAssetId != it.value()) { a.kitsuAssetId = it.value(); dirty = true; }
-    }
-    if (dirty) mm->saveProjectDb();
-  });
-  connect(kc, &KitsuClient::taskTypesMissing, this, [](const QStringList &names) {
-    DVGui::MsgBoxInPopup(
-        DVGui::WARNING,
-        tr("These workflow tasks were NOT created in Kitsu: the server has no "
-           "Shot task type with that name, and it refused to create one (only "
-           "a Kitsu admin can):\n\n%1\n\nCreate them in Kitsu (Settings > "
-           "Task Types) and sync again.")
-            .arg(names.join("\n")));
-  });
-  // A popup, not the status label: the label is overwritten a moment later by
-  // the asset-task push that chains after this one.
-  connect(kc, &KitsuClient::assetsSkipped, this, [](const QStringList &lines) {
-    DVGui::MsgBoxInPopup(
-        DVGui::WARNING,
-        tr("Some assets were NOT sent to Kitsu, because the Kitsu server has "
-           "no asset type with that name:\n\n%1\n\nCreate the type in Kitsu "
-           "(or change the asset's type here) and sync again.")
-            .arg(lines.join("\n")));
-  });
-  connect(kc, &KitsuClient::assetsPushed, this, [this](bool ok, int, int, const QString &msg) {
-    // Chain the asset task/status push after the entities exist (same pattern as
-    // shots: shotsPushed → pushTasks).
-    if (ok && !m_kitsuPendingAssetTasks.isEmpty()) {
-      if (m_kitsuSyncLabel) m_kitsuSyncLabel->setText(msg + tr("  Pushing asset task statuses…"));
-      KitsuClient::instance()->pushAssetTasks(ZtoryModel::instance()->kitsuProjectId(),
-                                              m_kitsuPendingAssetTasks);
-      m_kitsuPendingAssetTasks.clear();
-      return;
-    }
-    if (m_kitsuSyncLabel) {
-      m_kitsuSyncLabel->setStyleSheet(ok ? "color:#22D160;" : "color:#FF3860;");
-      m_kitsuSyncLabel->setText(msg);
-    }
-    updateKitsuButtons();
-  });
-  connect(kc, &KitsuClient::assetTasksPushed, this, [this](bool ok, int, const QString &msg) {
-    if (m_kitsuSyncLabel) {
-      m_kitsuSyncLabel->setStyleSheet(ok ? "color:#22D160;" : "color:#FF3860;");
-      m_kitsuSyncLabel->setText(msg);
-    }
-    updateKitsuButtons();
-  });
-  connect(kc, &KitsuClient::assetsPulled, this,
-          [this](bool ok, const QVector<KitsuAsset> &assets, const QString &msg) {
-    if (!ok) {
-      if (m_kitsuSyncLabel) { m_kitsuSyncLabel->setStyleSheet("color:#FF3860;"); m_kitsuSyncLabel->setText(msg); }
-      return;
-    }
-    // Import Kitsu-authored assets: match by id, then type+name; add the new ones.
-    ZtoryModel *mm = ZtoryModel::instance();
-    int added = 0, linked = 0, newTypes = 0;
-    bool dirty = false;
-    for (const KitsuAsset &ka : assets) {
-      if (ka.name.trimmed().isEmpty()) continue;
-      Asset *found = nullptr;
-      for (Asset &a : mm->assets()) {
-        if (!ka.kitsuAssetId.isEmpty() && a.kitsuAssetId == ka.kitsuAssetId) { found = &a; break; }
-        if (a.kitsuAssetId.isEmpty() && a.type == ka.type &&
-            a.name.trimmed().compare(ka.name.trimmed(), Qt::CaseInsensitive) == 0)
-          found = &a;  // keep looking for a stronger id match
-      }
-      if (found) {
-        if (found->kitsuAssetId != ka.kitsuAssetId) { found->kitsuAssetId = ka.kitsuAssetId; ++linked; dirty = true; }
-        continue;
-      }
-      // A Kitsu asset type this project has no pipeline for (the instance also
-      // defines Scene and analisi_target beyond our canonical four): create it,
-      // or the asset lands with a type that shows nowhere in the Asset Types
-      // tab and silently borrows the canonical task order.
-      if (!ka.type.trimmed().isEmpty() && !mm->findAssetType(ka.type)) {
-        mm->assetTypes().push_back(
-            AssetType{ka.type, ZtoryModel::canonicalAssetTaskOrder()});
-        ++newTypes;
-      }
-      mm->addAsset(ka.type, ka.name.trimmed());
-      mm->assets().back().kitsuAssetId = ka.kitsuAssetId;
-      ++added;
-      dirty = true;
-    }
-    if (dirty) { mm->saveProjectDb(); rebuildAssets(); }
-    if (newTypes > 0) reloadAssetTypesTab();
-    if (m_kitsuSyncLabel) {
-      m_kitsuSyncLabel->setStyleSheet("color:#22D160;");
-      m_kitsuSyncLabel->setText(
-          newTypes > 0
-              ? tr("%1 (%2 added, %3 linked, %4 new asset types)  Pulling asset "
-                   "statuses…")
-                    .arg(msg).arg(added).arg(linked).arg(newTypes)
-              : tr("%1 (%2 added, %3 linked)  Pulling asset statuses…")
-                    .arg(msg).arg(added).arg(linked));
-    }
-    // Entities are now imported/linked; pull their review statuses down too so
-    // the single "Pull assets" action mirrors the supervisor's asset state.
-    KitsuClient::instance()->pullAssetStatuses(
-        ZtoryModel::instance()->kitsuProjectId(),
-        ZtoryModel::instance()->kitsuEpisodeId());
-  });
-  connect(kc, &KitsuClient::assetStatusesPulled, this,
-          [this](bool ok, const QVector<KitsuAssetStatusEntry> &entries, const QString &msg) {
-    if (!ok) {
-      if (m_kitsuSyncLabel) { m_kitsuSyncLabel->setStyleSheet("color:#FF3860;"); m_kitsuSyncLabel->setText(msg); }
-      return;
-    }
-    ZtoryModel *mm = ZtoryModel::instance();
-    int updated = 0, adopted = 0; bool dirty = false;
-    for (const KitsuAssetStatusEntry &e : entries) {
-      const QString ekey = KitsuClient::normalizeTaskType(e.taskType);
-      for (Asset &a : mm->assets()) {
-        bool match;
-        if (!a.kitsuAssetId.isEmpty() && !e.kitsuAssetId.isEmpty())
-          match = (a.kitsuAssetId == e.kitsuAssetId);
-        else
-          match = (a.type == e.assetType &&
-                   a.name.trimmed().compare(e.assetName.trimmed(), Qt::CaseInsensitive) == 0);
-        if (!match) continue;
-        if (a.kitsuAssetId.isEmpty() && !e.kitsuAssetId.isEmpty()) { a.kitsuAssetId = e.kitsuAssetId; dirty = true; }
-        QString target;
-        for (const QString &tt : mm->assetTaskTypesForType(a.type))
-          if (KitsuClient::normalizeTaskType(tt) == ekey) { target = tt; break; }
-        // No counterpart in this asset type's pipeline: ADOPT the Kitsu task
-        // type instead of dropping it. Silently discarding it is what made a
-        // pull look like it had worked while leaving the tasks empty — on
-        // «CARTOON SCHOOL 2026», Modeling and Rigging vanished this way because
-        // Ztoryc's canonical pipeline is Concept/Rough/Clean/Color.
-        // Kitsu is the source of truth for the pipeline, so it gets appended.
-        if (target.isEmpty()) {
-          mm->addAssetTaskType(a.type, e.taskType);
-          target = e.taskType;
-          ++adopted;
-          dirty = true;
-        }
-        if (a.tasks[target].status != e.status) { a.tasks[target].status = e.status; ++updated; dirty = true; }
-        for (const QString &nm : e.assignees)
-          if (!a.tasks[target].assignees.contains(nm)) { a.tasks[target].assignees.push_back(nm); dirty = true; }
-      }
-    }
-    if (dirty) { mm->saveProjectDb(); rebuildAssets(); }
-    // Adopting a task type changes the asset-type PIPELINES, which the Asset
-    // Types tab shows in its own two-pane editor: without this it kept showing
-    // the pre-pull list, and the new columns in the asset table looked like
-    // they had come from nowhere.
-    if (adopted > 0) reloadAssetTypesTab();
-    if (m_kitsuSyncLabel) {
-      m_kitsuSyncLabel->setStyleSheet("color:#22D160;");
-      // Say how many task types were adopted: the asset table grew columns, and
-      // that should not look like it happened by itself.
-      m_kitsuSyncLabel->setText(
-          adopted > 0
-              ? tr("%1 (%2 updated, %3 new task types adopted from Kitsu)")
-                    .arg(msg).arg(updated).arg(adopted)
-              : tr("%1 (%2 updated)").arg(msg).arg(updated));
+      m_kitsuSyncLabel->setText(tr("Team from Kitsu: %1 added.").arg(added));
     }
   });
   connect(kc, &KitsuClient::breakdownPulled, this,
@@ -738,24 +541,12 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
         QObject::tr("%1 (%2 linked)").arg(msg).arg(linked) + extra);
   });
   connect(kc, &KitsuClient::teamPulled, this,
-          [this](bool ok, const QVector<KitsuPerson> &persons, const QString &msg) {
-    if (!ok) {
-      if (m_kitsuSyncLabel) { m_kitsuSyncLabel->setStyleSheet("color:#FF3860;"); m_kitsuSyncLabel->setText(msg); }
-      return;
-    }
-    ZtoryModel *mm = ZtoryModel::instance();
-    QStringList roster = mm->team();
-    int added = 0;
-    for (const KitsuPerson &p : persons)
-      if (!p.name.trimmed().isEmpty() && !roster.contains(p.name, Qt::CaseInsensitive)) {
-        roster.push_back(p.name);
-        ++added;
-      }
-    if (added > 0) { mm->setTeam(roster); mm->saveProjectDb(); rebuild(); }
-    if (m_kitsuSyncLabel) {
-      m_kitsuSyncLabel->setStyleSheet("color:#22D160;");
-      m_kitsuSyncLabel->setText(added > 0 ? tr("%1 (%2 added)").arg(msg).arg(added) : msg);
-    }
+          [this](bool ok, const QVector<KitsuPerson> &, const QString &msg) {
+    // The team itself is applied by ZtoryKitsuSync; the label only outside a
+    // Sync, whose summary it must not cover.
+    if (!m_kitsuSyncLabel || ZtoryKitsuSync::instance()->isRunning()) return;
+    m_kitsuSyncLabel->setStyleSheet(ok ? "color:#22D160;" : "color:#FF3860;");
+    m_kitsuSyncLabel->setText(msg);
   });
   // As soon as we're connected, pull the project's team so the assignee picker is
   // populated from Kitsu (Kitsu is authoritative on the roster while linked).
@@ -1406,6 +1197,20 @@ QWidget *ZtoryProductionPanel::buildProjectTab() {
   m_kitsuLabel = new QLabel(QObject::tr("Not linked to Kitsu."), m_kitsuGroup);
   m_kitsuLabel->setWordWrap(true);
   kgl->addWidget(m_kitsuLabel);
+  // Ztoryc: the automatic push of status changes (2026-09-26). Off by default;
+  // a machine setting, not a project one. Each change is sent only if Kitsu
+  // still has the status it started from — otherwise Kitsu's is kept.
+  auto *autoPush = new QCheckBox(
+      QObject::tr("Push status changes to Kitsu automatically"), m_kitsuGroup);
+  autoPush->setChecked(KitsuClient::instance()->autoPushStatus());
+  autoPush->setToolTip(QObject::tr(
+      "Every status change made in Ztoryc is sent to Kitsu as it happens — "
+      "only if the task on Kitsu still has the status it started from. If "
+      "someone changed it on Kitsu meanwhile, Kitsu's status is kept and "
+      "Ztoryc takes it."));
+  connect(autoPush, &QCheckBox::toggled, this,
+          [](bool on) { KitsuClient::instance()->setAutoPushStatus(on); });
+  kgl->addWidget(autoPush);
   // ⚠️ Two different things: LINKED (the project is bound to a Kitsu
   // production — saved in production.ztrack, it survives restarts; the label
   // above) and CONNECTED (logged in — lasts until Ztoryc closes; this button).
@@ -1436,31 +1241,26 @@ QWidget *ZtoryProductionPanel::buildProjectTab() {
   handlesRow->addStretch(1);
   kgl->addLayout(handlesRow);
 
-  m_kitsuPushBtn   = new QPushButton(QObject::tr("Push shots + statuses →"), m_kitsuGroup);
-  m_kitsuPullBtn   = new QPushButton(QObject::tr("← Pull statuses"), m_kitsuGroup);
   m_kitsuUploadBtn = new QPushButton(QObject::tr("Upload shot previews →"), m_kitsuGroup);
-  m_kitsuPushBtn->setToolTip(QObject::tr(
-      "Create/update the project's shots + tasks in Kitsu from Ztoryc."));
-  m_kitsuPullBtn->setToolTip(QObject::tr(
-      "Pull task statuses down from Kitsu (the supervisor's WFA→Done/Retake)."));
   m_kitsuUploadBtn->setToolTip(QObject::tr(
       "Pick a folder of per-shot clips and upload each to its shot's task\n"
       "(matched by shot name + {TASK} code), setting it to WFA."));
-  auto *syncRow = new QHBoxLayout();
-  syncRow->addWidget(m_kitsuPushBtn);
-  syncRow->addWidget(m_kitsuPullBtn);
-  kgl->addLayout(syncRow);
+  // Ztoryc: ONE Sync button instead of Push/Pull for shots and assets
+  // (Franco, 2026-09-27). The old four stay as objects — updateKitsuButtons
+  // and the handlers still use them — but are not shown.
+  m_kitsuSyncBtn = new QPushButton(QObject::tr("⇄ Sync with Kitsu"),
+                                   m_kitsuGroup);
+  m_kitsuSyncBtn->setToolTip(QObject::tr(
+      "Brings Ztoryc and Kitsu in line, shots and assets: new shots and assets "
+      "are created on Kitsu, new assets from Kitsu come in, and statuses are "
+      "merged — what changed on Kitsu comes in, what changed in Ztoryc goes "
+      "out. Each task remembers its status at the last sync, so it knows who "
+      "changed what; if both changed it, Kitsu's status is kept."));
+  kgl->addWidget(m_kitsuSyncBtn);
 
-  m_kitsuPushAssetsBtn = new QPushButton(QObject::tr("Push assets to Kitsu →"), m_kitsuGroup);
-  m_kitsuPullAssetsBtn = new QPushButton(QObject::tr("← Pull assets from Kitsu"), m_kitsuGroup);
-  m_kitsuPushAssetsBtn->setToolTip(QObject::tr(
-      "Create the project's assets in Kitsu from Ztoryc (upsert by type+name)."));
-  m_kitsuPullAssetsBtn->setToolTip(QObject::tr(
-      "Import assets authored in Kitsu into the tracker (matched by type+name)."));
-  auto *assetRow = new QHBoxLayout();
-  assetRow->addWidget(m_kitsuPushAssetsBtn);
-  assetRow->addWidget(m_kitsuPullAssetsBtn);
-  kgl->addLayout(assetRow);
+  connect(m_kitsuSyncBtn, &QPushButton::clicked, this,
+          &ZtoryProductionPanel::onKitsuSync);
+
 
   kgl->addWidget(m_kitsuUploadBtn);
   m_kitsuSyncLabel = new QLabel(QString(), m_kitsuGroup);
@@ -1468,11 +1268,7 @@ QWidget *ZtoryProductionPanel::buildProjectTab() {
   kgl->addWidget(m_kitsuSyncLabel);
   form->addRow(m_kitsuGroup);
 
-  connect(m_kitsuPushBtn,   &QPushButton::clicked, this, &ZtoryProductionPanel::onKitsuPush);
-  connect(m_kitsuPullBtn,   &QPushButton::clicked, this, &ZtoryProductionPanel::onKitsuPull);
   connect(m_kitsuUploadBtn, &QPushButton::clicked, this, &ZtoryProductionPanel::onKitsuUpload);
-  connect(m_kitsuPushAssetsBtn, &QPushButton::clicked, this, &ZtoryProductionPanel::onKitsuPushAssets);
-  connect(m_kitsuPullAssetsBtn, &QPushButton::clicked, this, &ZtoryProductionPanel::onKitsuPullAssets);
 
   for (QLineEdit *e : {m_prodEdit, m_codeEdit, m_seasonEdit, m_titleEdit, m_epEdit, m_patternEdit})
     connect(e, &QLineEdit::editingFinished, this,
@@ -1586,46 +1382,37 @@ void ZtoryProductionPanel::updateKitsuButtons() {
                        .arg(KitsuClient::instance()->email())
                  : tr("Log in to Kitsu to push or pull."));
   }
-  if (m_kitsuPushBtn)   m_kitsuPushBtn->setEnabled(linked);
-  if (m_kitsuPullBtn)   m_kitsuPullBtn->setEnabled(linked);
+  // Not while a Sync runs: a second one would interleave its steps.
+  if (m_kitsuSyncBtn)
+    m_kitsuSyncBtn->setEnabled(linked && !ZtoryKitsuSync::instance()->isRunning());
   if (m_kitsuUploadBtn) m_kitsuUploadBtn->setEnabled(linked);
-  if (m_kitsuPushAssetsBtn) m_kitsuPushAssetsBtn->setEnabled(linked);
-  if (m_kitsuPullAssetsBtn) m_kitsuPullAssetsBtn->setEnabled(linked);
   if (m_kitsuHandlesCheck) m_kitsuHandlesCheck->setEnabled(linked);
   if (m_kitsuHandlesSpin)  m_kitsuHandlesSpin->setEnabled(linked);
 }
 
-void ZtoryProductionPanel::onKitsuPush() {
-  ZtoryModel *m = ZtoryModel::instance();
-  if (!m->isKitsuLinked()) return;
+// Ztoryc: the one Sync button (2026-09-27). The work is ZtoryKitsuSync's;
+// here the confirmation of a large send, and the label.
+void ZtoryProductionPanel::onKitsuSync() {
+  ZtoryKitsuSync *sync = ZtoryKitsuSync::instance();
+  // The first Sync of a project (no base yet) can write many statuses on
+  // Kitsu: say it before, not after.
+  const int toSend = ZtoryKitsuSync::pendingSends();
+  if (toSend > 10 &&
+      DVGui::MsgBox(tr("This Sync will send %1 statuses from Ztoryc to Kitsu "
+                       "(each only where Kitsu still has the status of the "
+                       "last sync).\n\nContinue?")
+                        .arg(toSend),
+                    tr("Sync"), tr("Cancel"), 1) != 1)
+    return;
   const int handles =
       m_kitsuHandlesCheck->isChecked() ? m_kitsuHandlesSpin->value() : 0;
-  int skipped = 0;
-  QVector<KitsuShotPush> shots =
-      KitsuClient::buildShotPushFromProject(handles, m_kitsuPendingTasks, skipped);
-  if (shots.isEmpty()) {
-    m_kitsuSyncLabel->setStyleSheet("color:#FF3860;");
-    m_kitsuSyncLabel->setText(tr("No shots to push."));
+  QString why;
+  if (!sync->start(handles, &why)) {
+    m_kitsuSyncLabel->setStyleSheet("color:#FFB000;");
+    m_kitsuSyncLabel->setText(why);
     return;
   }
-  const bool tvshow = m->productionType() == "tvshow";
-  m_kitsuSyncLabel->setStyleSheet(QString());
-  m_kitsuSyncLabel->setText(tr("Pushing %1 shots…").arg(shots.size()));
-  KitsuClient::instance()->pushShots(m->kitsuProjectId(), m->episode(), tvshow, shots);
-}
-
-void ZtoryProductionPanel::onKitsuPull() {
-  ZtoryModel *m = ZtoryModel::instance();
-  if (!m->isKitsuLinked()) return;
-  m_kitsuSyncLabel->setStyleSheet(QString());
-  m_kitsuSyncLabel->setText(tr("Pulling statuses from Kitsu…"));
-  // Also refresh the team roster (project members) from Kitsu; independent async
-  // call, populates the assignee picker.
-  KitsuClient::instance()->pullTeam(m->kitsuProjectId());
-  // The episode id narrows the pull to this episode's shots. The team stays
-  // project-wide on purpose: a tvshow's crew is the show's, not the episode's.
-  KitsuClient::instance()->pullStatuses(m->kitsuProjectId(),
-                                        m->kitsuEpisodeId());
+  updateKitsuButtons();
 }
 
 void ZtoryProductionPanel::onKitsuUpload() {
@@ -1644,53 +1431,13 @@ void ZtoryProductionPanel::onKitsuUpload() {
              : tr("No clips matched a shot name."));
     return;
   }
-  // Optimistic local WFA mirror (the upload sets WFA on Kitsu too).
-  auto &pshots = m->projectShots_rw();
-  bool dirty = false;
-  for (const KitsuPreviewUpload &u : uploads)
-    for (ProjectShot &ps : pshots)
-      if (ps.uuid == u.uuid) {
-        if (ps.tasks[u.taskType].status != TaskStatus::Wfa) {
-          ps.tasks[u.taskType].status = TaskStatus::Wfa;
-          dirty = true;
-        }
-        break;
-      }
-  if (dirty) m->saveAndNotifyTasks();
+  KitsuClient::mirrorUploadedWfa(uploads);
   m_kitsuSyncLabel->setStyleSheet(QString());
   m_kitsuSyncLabel->setText(tr("Uploading %1 previews…%2")
                                 .arg(uploads.size())
                                 .arg(noId ? tr(" (%1 not on Kitsu yet)").arg(noId)
                                           : QString()));
   KitsuClient::instance()->uploadPreviews(m->kitsuProjectId(), uploads);
-}
-
-void ZtoryProductionPanel::onKitsuPushAssets() {
-  ZtoryModel *m = ZtoryModel::instance();
-  if (!m->isKitsuLinked()) return;
-  const QVector<KitsuAsset> assets = KitsuClient::buildAssetsFromModel();
-  if (assets.isEmpty()) {
-    m_kitsuSyncLabel->setStyleSheet("color:#FF3860;");
-    m_kitsuSyncLabel->setText(tr("No assets to push."));
-    return;
-  }
-  // Queue the per-asset task statuses (from each asset type's pipeline); pushed
-  // right after the entities exist via the assetsPushed → pushAssetTasks chain.
-  m_kitsuPendingAssetTasks = KitsuClient::buildAssetTasksFromModel();
-  m_kitsuSyncLabel->setStyleSheet(QString());
-  m_kitsuSyncLabel->setText(tr("Pushing %1 assets…").arg(assets.size()));
-  KitsuClient::instance()->pushAssets(m->kitsuProjectId(), assets);
-}
-
-void ZtoryProductionPanel::onKitsuPullAssets() {
-  ZtoryModel *m = ZtoryModel::instance();
-  if (!m->isKitsuLinked()) return;
-  m_kitsuSyncLabel->setStyleSheet(QString());
-  m_kitsuSyncLabel->setText(tr("Pulling assets from Kitsu…"));
-  // Scoped to the bound episode: the other episodes' assets are not ours.
-  // Assets with no episode are the show's shared library and still come down.
-  KitsuClient::instance()->pullAssets(m->kitsuProjectId(),
-                                      m->kitsuEpisodeId());
 }
 
 void ZtoryProductionPanel::applyProjectFromFields() {
@@ -1827,11 +1574,34 @@ bool ZtoryProductionPanel::editAssetPsdOptions(int assetIndex) {
   return true;
 }
 
+// Ztoryc: il PSD da riggare di un personaggio (Franco, 2026-09-26). Si parte
+// dalla cartella dei model sheet, dove i disegni dei personaggi stanno.
+bool ZtoryProductionPanel::linkAssetRigPsdInteractive(int assetIndex) {
+  ZtoryModel *m = ZtoryModel::instance();
+  if (assetIndex < 0 || assetIndex >= m->assetCount()) return false;
+  const Asset &a      = m->assets()[assetIndex];
+  const QString start = !a.rigPsdPath.isEmpty() ? m->resolveAssetRigPsd(a)
+                                                : m->modelSheetDir();
+  const QString f = QFileDialog::getOpenFileName(
+      this, QObject::tr("PSD to rig for %1").arg(a.name), start,
+      QObject::tr("Photoshop files (*.psd)"));
+  if (f.isEmpty()) return false;
+  m->setAssetRigPsd(assetIndex, f);
+  persistAssets();
+  rebuildAssets();
+  rebuildBreakdown();
+  // Le opzioni si chiedono adesso, come per il file dell'asset: chiederle
+  // dopo vuol dire non chiederle mai, e il PSD entrerebbe con quelle di
+  // progetto senza che nessuno l'abbia deciso.
+  editAssetPsdOptions(assetIndex);
+  return true;
+}
+
 bool ZtoryProductionPanel::linkAssetFileInteractive(int assetIndex) {
   ZtoryModel *m = ZtoryModel::instance();
   if (assetIndex < 0 || assetIndex >= m->assetCount()) return false;
   const Asset &a    = m->assets()[assetIndex];
-  const bool isChar = a.type.compare("Character", Qt::CaseInsensitive) == 0;
+  const bool isChar = ZtoryModel::isCharacterType(a.type);
 
   // Un personaggio cutout E' una scena, e nello shot entra come sotto-scena:
   // per quello serve il .tnz. Prop e sfondi sono livelli, e il legame diretto
@@ -1920,7 +1690,7 @@ void ZtoryProductionPanel::onBreakdownContextMenu(const QPoint &pos) {
   ZtoryModel *m = ZtoryModel::instance();
   if (assetIndex < 0 || assetIndex >= m->assetCount()) return;
   const Asset &a    = m->assets()[assetIndex];
-  const bool isChar = a.type.compare("Character", Qt::CaseInsensitive) == 0;
+  const bool isChar = ZtoryModel::isCharacterType(a.type);
 
   QMenu menu(this);
   QAction *linkAct = menu.addAction(isChar
@@ -1929,15 +1699,29 @@ void ZtoryProductionPanel::onBreakdownContextMenu(const QPoint &pos) {
   QAction *clearAct = a.filePath.isEmpty()
                           ? nullptr
                           : menu.addAction(QObject::tr("Clear link"));
+  QAction *rigLinkAct = nullptr, *rigClearAct = nullptr;
+  if (isChar) {
+    menu.addSeparator();
+    rigLinkAct = menu.addAction(QObject::tr("Link PSD to rig…"));
+    if (!a.rigPsdPath.isEmpty())
+      rigClearAct = menu.addAction(QObject::tr("Clear PSD link"));
+  }
   QAction *psdAct = nullptr;
-  if (QFileInfo(m->resolveAssetFile(a)).suffix().compare(
-          "psd", Qt::CaseInsensitive) == 0) {
+  if (QFileInfo(isChar ? m->resolveAssetRigPsd(a) : m->resolveAssetFile(a))
+          .suffix()
+          .compare("psd", Qt::CaseInsensitive) == 0) {
     menu.addSeparator();
     psdAct = menu.addAction(QObject::tr("PSD import options…"));
   }
   QAction *ch = menu.exec(m_breakdownTable->viewport()->mapToGlobal(pos));
   if (!ch) return;
-  if (ch == psdAct) {
+  if (ch == rigLinkAct) {
+    linkAssetRigPsdInteractive(assetIndex);
+  } else if (ch == rigClearAct) {
+    m->setAssetRigPsd(assetIndex, QString());
+    persistAssets();
+    rebuildAssets();
+  } else if (ch == psdAct) {
     editAssetPsdOptions(assetIndex);
   } else if (ch == linkAct) {
     linkAssetFileInteractive(assetIndex);
@@ -2297,7 +2081,7 @@ QWidget *ZtoryProductionPanel::buildAssetsTab() {
           &ZtoryProductionPanel::onAssetContextMenu);
 
   connect(addBtn, &QPushButton::clicked, this, [this] {
-    ZtoryModel::instance()->addAsset("Character", QObject::tr("New asset"));
+    ZtoryModel::instance()->addAsset(ZtoryModel::kCharacterType, QObject::tr("New asset"));
     persistAssets();
   });
   connect(remBtn, &QPushButton::clicked, this, [this] {
@@ -2425,7 +2209,7 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
     const int row = it->row();
     if (row < 0 || row >= m->assetCount()) return;
     const Asset &a    = m->assets()[row];
-    const bool isChar = a.type.compare("Character", Qt::CaseInsensitive) == 0;
+    const bool isChar = ZtoryModel::isCharacterType(a.type);
 
     QMenu rowMenu(this);
     QAction *linkAct  = rowMenu.addAction(isChar
@@ -2442,9 +2226,21 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
     // Scostamento dalla politica di progetto, per QUESTO asset. «Use project
     // default» e' una voce a sé e non l'assenza di scelta: si deve poter
     // tornare indietro, e si deve vedere quale delle tre e' attiva.
+    // Il PSD da riggare: per un personaggio le opzioni PSD valgono per lui.
+    QAction *rigLinkAct = nullptr, *rigClearAct = nullptr;
+    if (isChar) {
+      rowMenu.addSeparator();
+      rigLinkAct = rowMenu.addAction(QObject::tr("Link PSD to rig…"));
+      if (!a.rigPsdPath.isEmpty()) {
+        rigClearAct   = rowMenu.addAction(QObject::tr("Clear PSD link"));
+        QAction *shown = rowMenu.addAction(a.rigPsdPath);
+        shown->setEnabled(false);
+      }
+    }
     QAction *psdAct = nullptr;
-    if (QFileInfo(m->resolveAssetFile(a)).suffix().compare(
-            "psd", Qt::CaseInsensitive) == 0)
+    if (QFileInfo(isChar ? m->resolveAssetRigPsd(a) : m->resolveAssetFile(a))
+            .suffix()
+            .compare("psd", Qt::CaseInsensitive) == 0)
       psdAct = rowMenu.addAction(QObject::tr("PSD import options…"));
 
     rowMenu.addSeparator();
@@ -2470,6 +2266,13 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
     QAction *ch = rowMenu.exec(m_assetTable->viewport()->mapToGlobal(pos));
     if (!ch) return;
     if (ch == psdAct) { editAssetPsdOptions(row); return; }
+    if (ch == rigLinkAct) { linkAssetRigPsdInteractive(row); return; }
+    if (ch == rigClearAct) {
+      m->setAssetRigPsd(row, QString());
+      persistAssets();
+      rebuildAssets();
+      return;
+    }
 
     for (const ModeAct &ma : modeActs)
       if (ch == ma.act) {
@@ -2528,8 +2331,12 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
       for (const Target &t : targets) {
         TaskStatus old = m->assets()[t.row].tasks.value(t.task).status;
         if (old == s) continue;
-        m->setAssetTaskStatusByUuid(t.uuid, t.task, s);
-        TUndoManager::manager()->add(new AssetStatusUndo(t.uuid, t.task, old, s));
+        QVector<ZtoryTaskFlow::Change> fx;
+        ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Asset, t.uuid, t.task,
+                                 s, ZtoryTaskFlow::Origin::User,
+                                 /*batch=*/true, &fx);
+        TUndoManager::manager()->add(
+            new AssetStatusUndo(t.uuid, t.task, old, s, fx));
       }
     }
   }
@@ -2554,10 +2361,14 @@ void ZtoryProductionPanel::editAssetCell(int row, int col) {
   TaskEditResult r = pickTaskEdit(this, taskType, oldStatus, oldAssign);
   if (r.kind == TaskEditResult::Status) {
     if (r.status == oldStatus) return;
-    m->setAssetTaskStatus(row, taskType, r.status);
+    QVector<ZtoryTaskFlow::Change> fx;
+    ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Asset, uuid, taskType,
+                             r.status, ZtoryTaskFlow::Origin::User,
+                             /*batch=*/true, &fx);
+    emit m->assetsChanged();
     persistAssets();
     TUndoManager::manager()->add(
-        new AssetStatusUndo(uuid, taskType, oldStatus, r.status));
+        new AssetStatusUndo(uuid, taskType, oldStatus, r.status, fx));
   } else if (r.kind == TaskEditResult::Assignees) {
     if (r.assignees == oldAssign) return;
     m->setAssetTaskAssignees(row, taskType, r.assignees);
@@ -3251,9 +3062,12 @@ void ZtoryProductionPanel::onShotContextMenu(const QPoint &pos) {
           for (const ProjectShot &ps : m->projectShots())
             if (ps.uuid == t.uuid) { old = ps.tasks.value(t.task).status; break; }
           if (old == s) continue;
-          m->setProjectShotTaskStatusByUuid(t.uuid, t.task, s);
+          QVector<ZtoryTaskFlow::Change> fx;
+          ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Shot, t.uuid, t.task,
+                                   s, ZtoryTaskFlow::Origin::User,
+                                   /*batch=*/true, &fx);
           TUndoManager::manager()->add(
-              new ProjectShotStatusUndo(t.uuid, t.task, old, s));
+              new ProjectShotStatusUndo(t.uuid, t.task, old, s, fx));
         } else {
           TaskStatus old = m->shot(t.row).tasks.value(t.task).status;
           if (old == s) continue;
@@ -3291,10 +3105,14 @@ void ZtoryProductionPanel::editCell(int row, int col) {
     TaskEditResult r = pickTaskEdit(this, taskType, oldStatus, oldAssign);
     if (r.kind == TaskEditResult::Status) {
       if (r.status == oldStatus) return;
-      m->setProjectShotTaskStatusByUuid(uuid, taskType, r.status);
+      QVector<ZtoryTaskFlow::Change> fx;
+      ZtoryTaskFlow::setStatus(ZtoryTaskFlow::Entity::Shot, uuid, taskType,
+                               r.status, ZtoryTaskFlow::Origin::User,
+                               /*batch=*/true, &fx);
+      emit m->taskStatusChanged();
       persistProjectDb();
       TUndoManager::manager()->add(
-          new ProjectShotStatusUndo(uuid, taskType, oldStatus, r.status));
+          new ProjectShotStatusUndo(uuid, taskType, oldStatus, r.status, fx));
     } else if (r.kind == TaskEditResult::Assignees) {
       if (r.assignees == oldAssign) return;
       m->setProjectShotAssigneesByUuid(uuid, taskType, r.assignees);

@@ -144,6 +144,9 @@ struct KitsuTaskPush {
   // sure it EXISTS in Kitsu, but never push a status for it — Ztoryc has no
   // opinion, and Kitsu may already know better.
   bool        createOnly = false;
+  // The status Kitsu should have (the base): written only if it still has it.
+  TaskStatus  expected = TaskStatus::Todo;
+  QString     uuid;  // the project shot's, to move its base once written
   int         order = 0;  // 1-based position in the shot's workflow
 };
 
@@ -156,6 +159,21 @@ struct KitsuAssetTaskPush {
   QString     taskType;
   TaskStatus  status = TaskStatus::Todo;
   QStringList assignees;  // Ztoryc assignee names to add (add-only) in Kitsu
+  // As in KitsuTaskPush: unchanged since the last sync → never given a status;
+  // `expected` is the base Kitsu must still have.
+  bool        createOnly = false;
+  TaskStatus  expected   = TaskStatus::Todo;
+  QString     uuid;  // the asset's, to move its base once written
+};
+
+// Ztoryc: ONE status change to send to Kitsu, safely (2026-09-26): it is
+// written only if Kitsu still has `from`. kitsuEntityId is the shot's or the
+// asset's Kitsu id.
+struct KitsuTransition {
+  int        entity = 0;  // 0 shot, 1 asset (as ZtoryTaskFlow::Entity)
+  int        origin = 0;  // ZtoryTaskFlow::Origin: 1 = caused by the app
+  QString    uuid, kitsuEntityId, taskType;
+  TaskStatus from = TaskStatus::Todo, to = TaskStatus::Todo;
 };
 
 // One shot-task status pulled DOWN from Kitsu (review sync). taskType is the
@@ -207,6 +225,27 @@ public:
   // alive across Connect-dialog opens, so the user stays logged in for the session.
   static KitsuClient *instance();
 
+  // --- Safe push of single status changes (2026-09-26) -------------------
+  // Queued and sent one at a time, with a state of their own: they cannot
+  // disturb a full push, pull or upload running at the same moment. A change
+  // is written only if the task on Kitsu still has the status it started
+  // from; if Kitsu has moved on, Kitsu wins (see transitionPushed).
+  enum TransitionResult { TrPushed, TrAlreadyThere, TrConflict, TrNoTask,
+                          TrFailed };
+  void pushTransition(const KitsuTransition &t);
+  // Push every status change made in Ztoryc as it happens. Off by default
+  // (Franco, 2026-09-26); remembered in the settings.
+  bool autoPushStatus() const { return m_autoPushStatus; }
+  void setAutoPushStatus(bool on);
+  // Uploads `filePath` as a preview on the entity's task (0 shot, 1 asset),
+  // in a comment that sets `status` — the character's WFA with its preview
+  // (2026-09-26). Same caches and state as the safe push, none shared with
+  // the full push/pull/upload. Returns a token; the answer comes with
+  // reviewPreviewUploaded(token, …).
+  int uploadReviewPreview(int entity, const QString &kitsuEntityId,
+                          const QString &taskType, const QString &filePath,
+                          TaskStatus status);
+
   // --- Config (persisted in QSettings, group "Ztoryc/Kitsu") -----------
   QString baseUrl() const { return m_baseUrl; }
   void    setBaseUrl(const QString &url);  // trailing slash trimmed
@@ -234,6 +273,9 @@ public:
   void saveSettings(bool savePassword);
 
   bool isLoggedIn() const { return !m_accessToken.isEmpty(); }
+  // Ztoryc: the server's task statuses are loaded. Without them every status
+  // read from Kitsu would map to Todo — a Sync must not run (2026-09-27).
+  bool hasTaskStatuses() const { return !m_statusById.isEmpty(); }
 
   // Role of the logged-in user (admin / manager / supervisor / user / …).
   QString userRole() const { return m_userRole; }
@@ -327,6 +369,11 @@ public:
   // technique; defaults to Storyboard). Reads ZtoryModel::projectShots(). Shared
   // by the Connect dialog and the post-export auto-upload. outUnmatched/outNoId
   // report files with no matching shot / matched shots not yet pushed to Kitsu.
+  // Ztoryc: the local mirror of a clip upload — the upload sets WFA on Kitsu,
+  // so Ztoryc writes WFA and moves the base to it. A raw write, not a
+  // transition (it must not be pushed back). Optimistic: if the upload then
+  // fails, the next Sync brings Kitsu's status back. Saves and notifies.
+  static void mirrorUploadedWfa(const QVector<KitsuPreviewUpload> &uploads);
   static QVector<KitsuPreviewUpload> buildUploadsFromFolder(const QString &dir,
                                                             int &outUnmatched,
                                                             int &outNoId);
@@ -396,6 +443,12 @@ signals:
   void teamPulled(bool ok, const QVector<KitsuPerson> &persons,
                   const QString &message);
   void previewsUploaded(bool ok, int uploaded, const QString &message);
+  // One queued status change was handled. result: TransitionResult;
+  // serverStatus: the TaskStatus Kitsu had (meaningful for TrConflict).
+  void reviewPreviewUploaded(int token, bool ok, const QString &message);
+  void transitionPushed(int entity, const QString &uuid,
+                        const QString &taskType, int result, int serverStatus,
+                        const QString &message);
   void networkError(const QString &message);
 
 private:
@@ -525,7 +578,7 @@ private:
 
   // Asset-task push pipeline (mirror of the shot task pipeline for assets).
   void atLoadTaskTypes();    // GET /api/data/task-types (for_entity = Asset)
-  void atCreateNext();       // create-tasks per asset task-type
+  void atCreateNext();       // create the missing tasks of THESE assets, one by one
   void atLoadAssetTypes();   // GET /api/data/asset-types (name -> id)
   void atLoadAssets();       // GET project assets ("typeId/name" -> asset id)
   void atLoadTasks();        // GET project tasks ("assetId/ttId" -> task id)
@@ -540,7 +593,7 @@ private:
   QHash<QString, QString> m_atTaskIdByKey;      // "assetId/ttId" -> task id
   QHash<QString, QString> m_atStatusByKey;      // "assetId/ttId" -> current status id
   QHash<QString, QSet<QString>> m_atAssigneesByKey; // "assetId/ttId" -> person ids
-  QVector<QString>        m_atTtCreateQueue;    // task-type ids to create-tasks for
+  QVector<int>            m_atCreateList;       // m_atQueue indexes whose task is missing
   int m_atCreateIdx    = 0;
   int m_atApplyIdx     = 0;
   int m_atStatusesSet  = 0;
@@ -591,6 +644,38 @@ private:
   // Resolve which base URL the upload uses (local if reachable, else primary),
   // then kick off the upload machine.
   void uplProbeLocalThenRun();
+  void rebuildStatusIdByZ();  // m_statusIdByZ from m_taskStatuses
+  void parseShotTaskTypes(const QByteArray &body);  // → m_ttIdByName
+
+  // Safe push state — separate from every other machine on purpose.
+  QList<KitsuTransition>  m_trQueue;
+  bool                    m_trBusy = false;
+  bool                    m_trCachesLoaded = false;
+  QHash<QString, QString> m_trTaskTypeId;   // normalized name -> id
+  QHash<QString, TaskStatus> m_trStatusById; // Kitsu status id -> TaskStatus
+  QHash<int, QString>     m_trStatusIdByZ;  // TaskStatus -> canonical id
+  bool                    m_autoPushStatus = false;
+  int                     m_revToken = 0;
+  void trNext();
+  // Loads the safe push's caches, then calls onDone (or onFail).
+  void trLoadCaches(std::function<void()> onDone,
+                    std::function<void(const QString &)> onFail);
+  // The task-type key: entity kind + normalized name. Kitsu can have a
+  // «Rigging» for shots AND one for assets; by name alone they collide.
+  static QString trTypeKey(int entity, const QString &taskType);
+  // True if `statusId` is one of the six pipeline statuses (or empty). A
+  // custom Kitsu status (On Hold, neutral…) has no Ztoryc equivalent and
+  // must not be overwritten by a push.
+  bool isPipelineStatusId(const QString &statusId) const;
+  // POSTs a file to /api/pictures/preview-files/<id> (the upload step shared
+  // by the clip upload and the review preview).
+  QNetworkReply *postPreviewFile(const QString &previewFileId,
+                                 const QString &filePath,
+                                 const QString &base);
+  void trCheckTask();
+  void trFinish(TransitionResult r, TaskStatus server, const QString &msg);
+  void onTaskTransition(int entity, const QString &uuid,
+                        const QString &taskType, int from, int to, int origin);
   void uplLoadTaskTypes();
   void uplEnsureTasks();  // create the missing task of each uploaded shot
   void uplLoadTasks();

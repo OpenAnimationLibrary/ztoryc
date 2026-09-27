@@ -109,6 +109,11 @@ enum class TaskStatus { Todo, Ready, Wip, Wfa, Retake, Done };
 struct TaskState {
   TaskStatus  status = TaskStatus::Todo;
   QStringList assignees;  // people assigned (free text / Kitsu user names) — multiple
+  // Ztoryc: the «base» — the status Kitsu had at the last sync (a pull, or a
+  // change that reached it). With it a sync can tell who changed what since:
+  // see ZtoryTaskFlow::mergeFromServer (2026-09-27).
+  bool        hasSynced = false;
+  TaskStatus  synced    = TaskStatus::Todo;
 };
 
 // A named production technique = ordered list of task-type names.
@@ -232,7 +237,14 @@ struct Asset {
   //   dalla cartella della categoria (vedi assetDirForType) piu' il nome.
   QString filePath;
   // Come portarlo nello shot. Vuota = si usa la politica di progetto.
+  // Per un Character le opzioni PSD valgono per rigPsdPath (la sua scena
+  // .tnz non e' un PSD): cosi' personaggi e sfondi hanno ognuno le sue.
   AssetImportPolicy importPolicy;
+  // Character: il PSD da riggare, importato da solo quando si crea la scena
+  // del personaggio (Franco, 2026-09-26). Relativo alla cartella del progetto
+  // quando ci sta dentro: un percorso assoluto non vale sul Dell ne' su
+  // Windows. Si legge con ZtoryModel::resolveAssetRigPsd.
+  QString rigPsdPath;
 };
 
 // A project-level shot record. Owns the production progress (task status/
@@ -292,10 +304,26 @@ enum class ZtoryWorkflow {
 
 // ─── ZtoryModel ───────────────────────────────────────────────────────────────
 
+// Ztoryc: the channel task-status changes are announced on. A separate
+// object, not a ZtoryModel signal: the tracker's bulk edits block the MODEL's
+// signals (QSignalBlocker) to avoid a refresh per task, and a push to Kitsu
+// must still hear every change they make (review of 2026-09-26).
+class ZtoryTaskEvents : public QObject {
+  Q_OBJECT
+public:
+  using QObject::QObject;
+signals:
+  // entity: 0 project shot, 1 asset; from/to: TaskStatus;
+  // origin: ZtoryTaskFlow::Origin. A pull from Kitsu does not emit it.
+  void transitioned(int entity, const QString &uuid, const QString &taskType,
+                    int from, int to, int origin);
+};
+
 class ZtoryModel : public QObject {
   Q_OBJECT
 
   std::vector<ShotData>             m_shots;
+  ZtoryTaskEvents                  *m_taskEvents = new ZtoryTaskEvents(this);
   std::vector<Asset>                m_assets;       // project-level asset list
   std::vector<ProjectShot>          m_projectShots; // all project shots (from production.ztrack)
   QVector<QString>                  m_storyboardFiles; // registered storyboard basenames
@@ -386,6 +414,19 @@ class ZtoryModel : public QObject {
 
 public:
   static ZtoryModel *instance();
+  // Ztoryc: the names Ztoryc's own logic depends on, in ONE place (they were
+  // spelled out in some twenty spots). They are Kitsu's default names; a
+  // production that renamed them on Kitsu would need changing only here.
+  // Compared without case: projects pulled from Kitsu spell them lowercase.
+  static const QString kCharacterType;   // the asset type of characters
+  static const QString kStoryboardTask;  // the board pass, before the shot scene
+  static bool isCharacterType(const QString &type);
+  static bool isStoryboardTask(const QString &taskType);
+  // The six statuses in pipeline order, and their colours (Kitsu's): one copy
+  // for the tracker and the Board's spreadsheet export, which had one each.
+  static const QVector<TaskStatus> &allTaskStatuses();
+  static QColor taskStatusColor(TaskStatus s);
+  ZtoryTaskEvents *taskEvents() { return m_taskEvents; }
 
   // ── Accesso dati ──────────────────────────────────────────────────────────
   int  shotCount() const { return (int)m_shots.size(); }
@@ -520,6 +561,11 @@ public:
   void setAssetFilePath(int i, const QString &path) {
     if (i >= 0 && i < (int)m_assets.size()) m_assets[i].filePath = path;
   }
+  // Il PSD da riggare di un personaggio: `absPath` si salva relativo alla
+  // cartella del progetto se ci sta dentro. Vuoto = toglie il legame.
+  void setAssetRigPsd(int i, const QString &absPath);
+  // Il percorso assoluto del PSD da riggare, o vuoto.
+  QString resolveAssetRigPsd(const Asset &a) const;
   QString productionType()  const { return m_productionType; }
   void    setProductionType(const QString &s) { m_productionType = s; }
   QString productionStyle() const { return m_productionStyle; }
@@ -597,9 +643,6 @@ public:
   // empty if the technique has none. Storyboard is the board/animatic pass that
   // precedes the .tnz work, so production advances start from this task.
   QString firstProductionTaskType(const QString &technique) const;
-  // The task that follows `afterTask` in the technique's order; empty if it is
-  // the last one (or not found). Drives the DONE → next-task-Ready cascade.
-  QString nextTaskType(const QString &technique, const QString &afterTask) const;
 
   // B3d — Naming convention
   // Resolve m_namingPattern substituting token map. Tokens: PROD, SEASON, EP,
@@ -686,6 +729,27 @@ public:
   void setAssetTaskStatus(int i, const QString &taskType, TaskStatus status);
   void setAssetTaskStatusByUuid(const QString &uuid, const QString &taskType,
                                 TaskStatus status);
+  // Ztoryc: raw read/write of one task status of a project shot (entity 0) or
+  // an asset (entity 1), by uuid. No rules, no signals: they are the storage
+  // under ZtoryTaskFlow, which is where every status change should go.
+  // A project-shot write is mirrored into the open scene's shot.
+  TaskStatus taskStatusOf(int entity, const QString &uuid,
+                          const QString &taskType, bool *found = nullptr) const;
+  bool writeTaskStatus(int entity, const QString &uuid, const QString &taskType,
+                       TaskStatus status);
+  // The base of one task (see TaskState::synced). Raw, like writeTaskStatus.
+  bool setTaskSynced(int entity, const QString &uuid, const QString &taskType,
+                     TaskStatus synced);
+  // Returns false when the task has no base yet.
+  bool taskSyncedOf(int entity, const QString &uuid, const QString &taskType,
+                    TaskStatus *synced) const;
+private:
+  // The task map of a project shot (entity 0) or an asset (1), or null. One
+  // lookup for the four accessors above: four copies drift apart.
+  QMap<QString, TaskState> *tasksOf(int entity, const QString &uuid);
+  const QMap<QString, TaskState> *tasksOf(int entity,
+                                          const QString &uuid) const;
+public:
   void setAssetTaskAssignees(int i, const QString &taskType,
                              const QStringList &assignees);
   void setAssetTaskAssigneesByUuid(const QString &uuid, const QString &taskType,

@@ -109,6 +109,9 @@ set(MOC_HEADERS
     ztoryproductionpanel.h
     ztorymodel.h
     ztoryshotops.h
+    ztorytaskflow.h
+    ztorycharacterreview.h
+    ztorykitsusync.h
     ztorylipsync.h
     ztoryassetimport.h
     ztorylipsyncdialog.h
@@ -266,6 +269,9 @@ set(SOURCES
     ztoryproductionpanel.cpp
     ztorymodel.cpp
     ztoryshotops.cpp
+    ztorytaskflow.cpp
+    ztorycharacterreview.cpp
+    ztorykitsusync.cpp
     ztorylipsync.cpp
     ztoryassetimport.cpp
     ztorylipsyncdialog.cpp
