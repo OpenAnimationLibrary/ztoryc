@@ -1097,6 +1097,22 @@ QWidget *ZtoryProductionPanel::buildProjectTab() {
   form->addRow(QObject::tr("Title:"),             m_titleEdit);
   form->addRow(QObject::tr("Default technique:"), m_techCombo);
   form->addRow(QObject::tr("Naming pattern:"),    m_patternEdit);
+  // Ztoryc (2026-09-27): the episode number and the asset files' convention.
+  m_epNumEdit = new QLineEdit(w);
+  m_epNumEdit->setMaxLength(8);
+  m_epNumEdit->setToolTip(QObject::tr(
+      "The episode's number, used as {EPNUM} — «06» in CS2606. Empty: read "
+      "from the episode name when it starts with the code (CS26 + "
+      "CS2606_MESSINA → 06)."));
+  m_assetPatternEdit = new QLineEdit(w);
+  m_assetPatternEdit->setToolTip(QObject::tr(
+      "How the asset files are named — used to FIND them in the category "
+      "folders and to RENAME them.\nTokens: {CODE} {EPNUM} {EP} {SEASON} "
+      "{PROD} {TYPE} {NAME} {VER}\n{TYPE}: PS props, BG backgrounds, CH "
+      "characters, FX effects. {NAME}: the asset's name in lower case, words "
+      "joined by «-».\nExample: CS2606_PS_bacchetta-magica_V1.psd"));
+  form->addRow(QObject::tr("Episode number:"),   m_epNumEdit);
+  form->addRow(QObject::tr("Asset file names:"), m_assetPatternEdit);
 
   // Dove stanno i file degli asset, UNA CARTELLA PER CATEGORIA. Con 145 asset
   // un percorso per ciascuno non lo compila nessuno: qui si indica la cartella
@@ -1272,7 +1288,8 @@ QWidget *ZtoryProductionPanel::buildProjectTab() {
 
   connect(m_kitsuUploadBtn, &QPushButton::clicked, this, &ZtoryProductionPanel::onKitsuUpload);
 
-  for (QLineEdit *e : {m_prodEdit, m_codeEdit, m_seasonEdit, m_titleEdit, m_epEdit, m_patternEdit})
+  for (QLineEdit *e : {m_prodEdit, m_codeEdit, m_seasonEdit, m_titleEdit, m_epEdit, m_patternEdit,
+                       m_epNumEdit, m_assetPatternEdit})
     connect(e, &QLineEdit::editingFinished, this,
             [this] { applyProjectFromFields(); });
   connect(m_techCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
@@ -1337,6 +1354,13 @@ void ZtoryProductionPanel::reloadProjectTab() {
   if (m_patternEdit) {
     const QString pat = m->namingPattern();
     m_patternEdit->setText(pat.isEmpty() ? m->defaultNamingPattern() : pat);
+  }
+  // Shown as what they will do: the derived number, the default convention.
+  if (m_epNumEdit) m_epNumEdit->setText(m->effectiveEpisodeNumber());
+  if (m_assetPatternEdit) {
+    const QString ap = m->assetFilePattern();
+    m_assetPatternEdit->setText(ap.isEmpty() ? ZtoryModel::defaultAssetFilePattern()
+                                             : ap);
   }
 
   // M5 — when linked to Kitsu, that instance owns the project metadata: mirror
@@ -1460,6 +1484,18 @@ void ZtoryProductionPanel::applyProjectFromFields() {
     m->setDefaultTechnique(m_techCombo->currentText());
   if (m_patternEdit && !m_patternEdit->text().trimmed().isEmpty())
     m->setNamingPattern(m_patternEdit->text().trimmed());
+  // Saved only when it differs from what the episode name says: a derived
+  // «06» written back would stay 06 when the episode becomes CS2607.
+  if (m_epNumEdit) {
+    const QString n = m_epNumEdit->text().trimmed();
+    m->setEpisodeNumber(n == m->derivedEpisodeNumber() ? QString() : n);
+  }
+  if (m_assetPatternEdit) {
+    const QString ap = m_assetPatternEdit->text().trimmed();
+    // The default stays implicit: saving it would freeze it.
+    m->setAssetFilePattern(ap == ZtoryModel::defaultAssetFilePattern() ? QString()
+                                                                       : ap);
+  }
   // Cartelle degli asset per categoria (export completo). Nessun trim del
   // percorso oltre agli spazi: un nome di cartella puo' contenerne.
   if (m_propsDirEdit)      m->setPropsDir(m_propsDirEdit->text().trimmed());
@@ -1580,19 +1616,31 @@ bool ZtoryProductionPanel::editAssetPsdOptions(int assetIndex) {
 // name, so the folder convention finds it (Franco, 2026-09-27). Asks first:
 // scenes that LOAD the file (point at it instead of copying it) would look
 // for the old name and lose it.
-void ZtoryProductionPanel::renameAssetFile(int row, const QString &file) {
+void ZtoryProductionPanel::renameAssetFile(int row, const QString &file,
+                                           const QString &newName) {
   ZtoryModel *m = ZtoryModel::instance();
   if (row < 0 || row >= m->assetCount()) return;
   const Asset a = m->assets()[row];
   const QFileInfo fi(file);
-  if (a.name.contains(QRegularExpression("[/\\\\:*?\"<>|]"))) {
+  if (newName.isEmpty() ||
+      newName.contains(QRegularExpression("[/\\\\:*?\"<>|]"))) {
     DVGui::warning(tr("«%1» cannot be a file name: link the file instead.")
-                       .arg(a.name));
+                       .arg(newName));
     return;
   }
-  const QString target = fi.absolutePath() + "/" + a.name +
-                         (fi.suffix().isEmpty() ? QString() : "." + fi.suffix());
-  if (QFileInfo::exists(target)) {
+  const QString target = fi.absolutePath() + "/" + newName;
+  // On a disk that ignores case (and Unicode form) a name differing only in
+  // those «exists» — as the file itself. That is a rename, not a clash; on a
+  // case-sensitive disk the folder lists both names, and then it IS a clash.
+  const auto same = [](const QString &x, const QString &y) {
+    return x.normalized(QString::NormalizationForm_C)
+               .compare(y.normalized(QString::NormalizationForm_C),
+                        Qt::CaseInsensitive) == 0;
+  };
+  const bool sameFile =
+      QFileInfo::exists(target) && same(QFileInfo(target).fileName(), fi.fileName()) &&
+      !QDir(fi.absolutePath()).entryList(QDir::Files).contains(QFileInfo(target).fileName());
+  if (QFileInfo::exists(target) && !sameFile) {
     DVGui::warning(tr("«%1» already exists: link the file instead.")
                        .arg(QFileInfo(target).fileName()));
     return;
@@ -1607,7 +1655,20 @@ void ZtoryProductionPanel::renameAssetFile(int row, const QString &file) {
                     .arg(a.name);
   // «Cancel» is the default: Enter pressed without reading renames nothing.
   if (DVGui::MsgBox(question, tr("Rename"), tr("Cancel"), 1) != 1) return;
-  if (!QFile::rename(file, target)) {
+  bool renamed;
+  if (sameFile) {  // two steps: through a temporary name not yet taken
+    QString tmp = target + ".ztoryc-rename";
+    for (int i = 1; QFileInfo::exists(tmp); ++i)
+      tmp = target + QString(".ztoryc-rename%1").arg(i);
+    renamed = QFile::rename(file, tmp);
+    if (renamed && !QFile::rename(tmp, target)) {
+      QFile::rename(tmp, file);  // back: the file must not vanish
+      renamed = false;
+    }
+  } else {
+    renamed = QFile::rename(file, target);
+  }
+  if (!renamed) {
     DVGui::warning(tr("Could not rename «%1».").arg(fi.fileName()));
     return;
   }
@@ -2083,17 +2144,18 @@ void ZtoryProductionPanel::rebuildBreakdown() {
       auto *fileItem = new QTableWidgetItem();
       if (found) {
         QString why;
-        bool isNear = false;
+        ZtoryModel::AssetMatch how = ZtoryModel::AssetMatch::None;
         const QString path =
-            m->resolveAssetFile(*found, &why, &breakdownDirCache, &isNear);
+            m->resolveAssetFile(*found, &why, &breakdownDirCache, &how);
+        const bool isNear = how == ZtoryModel::AssetMatch::NearName ||
+                            how == ZtoryModel::AssetMatch::Convention;
         if (!path.isEmpty()) {
           fileItem->setText(QFileInfo(path).fileName());
           fileItem->setToolTip(
-              isNear ? path + "\n\n" +
-                         QObject::tr("The file's name differs from the asset's: "
-                                     "rename it or link it (Assets tab, "
-                                     "right-click).")
-                   : path);
+              isNear ? path + "\n\n" + why + "\n" +
+                           QObject::tr("Check it, and link it (Assets tab, "
+                                       "right-click).")
+                     : path);
           fileItem->setForeground(
               QBrush(QColor(isNear ? "#3273DC" : "#22D160")));
         } else {
@@ -2170,18 +2232,17 @@ void ZtoryProductionPanel::showAssetLink(QTableWidgetItem *item, const Asset &a,
                                          QHash<QString, QFileInfoList> *dirCache) {
   ZtoryModel *m = ZtoryModel::instance();
   QString why;
-  bool isNear = false;
-  const QString file = m->resolveAssetFile(a, &why, dirCache, &isNear);
+  ZtoryModel::AssetMatch how = ZtoryModel::AssetMatch::None;
+  const QString file = m->resolveAssetFile(a, &why, dirCache, &how);
   QString tip;
   if (file.isEmpty()) {
     item->setIcon(linkDot(QColor("#FF3860")));
     tip = tr("No file — the export skips it: %1").arg(why);
-  } else if (isNear) {
-    // Blue: found, but by a name that is only NEARLY the asset's.
+  } else if (how == ZtoryModel::AssetMatch::NearName ||
+             how == ZtoryModel::AssetMatch::Convention) {
+    // Blue: deduced — nearly the name, or by the naming convention.
     item->setIcon(linkDot(QColor("#3273DC")));
-    tip = tr("Used, but %1.\nRight-click: rename the file, or link it as it "
-             "is.")
-              .arg(why);
+    tip = tr("Used, but %1.\nRight-click to link it (or rename it).").arg(why);
   } else {
     item->setIcon(linkDot(QColor("#22D160")));
     tip = a.filePath.isEmpty() ? tr("Found by folder and name: %1").arg(file)
@@ -2341,13 +2402,22 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
       psdAct = rowMenu.addAction(QObject::tr("PSD import options…"));
     // A file found by a name that is only nearly the asset's (the blue dot).
     QAction *renameAct = nullptr, *linkAsIsAct = nullptr;
-    bool isNear = false;
-    const QString nearFile = m->resolveAssetFile(a, nullptr, nullptr, &isNear);
-    if (isNear) {
+    ZtoryModel::AssetMatch how = ZtoryModel::AssetMatch::None;
+    const QString nearFile = m->resolveAssetFile(a, nullptr, nullptr, &how);
+    if (how == ZtoryModel::AssetMatch::NearName ||
+        how == ZtoryModel::AssetMatch::Convention) {
       rowMenu.addSeparator();
       const QFileInfo nf(nearFile);
-      renameAct = rowMenu.addAction(
-          QObject::tr("Rename the file to «%1.%2»").arg(a.name, nf.suffix()));
+      // Renamed by the production's convention (Franco, 2026-09-27), keeping
+      // the file's version when it has one.
+      QString part;
+      int ver = 0;
+      if (!m->parseAssetFileName(nf.completeBaseName(), a, &part, &ver) || ver < 1)
+        ver = 1;
+      const QString target = m->assetFileName(a, ver, nf.suffix());
+      if (target.compare(nf.fileName(), Qt::CaseSensitive) != 0)
+        renameAct = rowMenu.addAction(
+            QObject::tr("Rename the file to «%1»").arg(target));
       linkAsIsAct = rowMenu.addAction(
           QObject::tr("Link «%1» as it is").arg(nf.fileName()));
     }
@@ -2383,7 +2453,12 @@ void ZtoryProductionPanel::onAssetContextMenu(const QPoint &pos) {
       return;
     }
     if (ch == renameAct) {
-      renameAssetFile(row, nearFile);
+      QString part;
+      int ver = 0;
+      const QFileInfo nf(nearFile);
+      if (!m->parseAssetFileName(nf.completeBaseName(), a, &part, &ver) || ver < 1)
+        ver = 1;
+      renameAssetFile(row, nearFile, m->assetFileName(a, ver, nf.suffix()));
       return;
     }
     if (ch == rigLinkAct) { linkAssetRigPsdInteractive(row); return; }

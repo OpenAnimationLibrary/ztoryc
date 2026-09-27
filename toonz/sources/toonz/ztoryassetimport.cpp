@@ -148,8 +148,10 @@ ZtoryImportedAssets ztoryImportShotAssets(const QString &shotUuid,
     const Asset *a = m->assetByUuid(be.assetUuid);
     if (!a) continue;
     QString why;
-    bool isNear = false;
-    const QString file = m->resolveAssetFile(*a, &why, nullptr, &isNear);
+    ZtoryModel::AssetMatch how = ZtoryModel::AssetMatch::None;
+    const QString file = m->resolveAssetFile(*a, &why, nullptr, &how);
+    const bool isNear = how == ZtoryModel::AssetMatch::NearName ||
+                        how == ZtoryModel::AssetMatch::Convention;
     if (file.isEmpty()) {
       // Il controllo di prima l'ha gia' mostrato all'utente, che ha scelto di
       // proseguire: qui basta lasciarne traccia.

@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QPixmap>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 #include <QMap>
@@ -342,6 +343,11 @@ class ZtoryModel : public QObject {
   QString                           m_episode;     // user-defined episode
   QString                           m_season;      // user-defined season (e.g. CS26)
   QString                           m_namingPattern; // export naming convention (B3d)
+  // Ztoryc (2026-09-27): the episode's NUMBER («06» in CS2606) — m_episode is
+  // the episode's name as on Kitsu — and the convention of the ASSET files,
+  // used both to recognise them and to rename them.
+  QString                           m_episodeNumber;
+  QString                           m_assetFilePattern;
   // Kitsu (M5) — project metadata kept aligned with the bound Kitsu project so
   // the Production Tracker mirrors it as closely as possible.
   bool                              m_useKitsu = false; // opt-in Kitsu sync UI
@@ -513,12 +519,22 @@ public:
   // `dirCache` (optional): category folders already listed, reused — the
   // asset table resolves every asset at each redraw, and without it lists
   // the same folder once per asset (2026-09-27).
-  // `nearMatch` (optional): set when the file was found with a name that is
-  // NEARLY the asset's (see assetNameKey / the rule in the .cpp) — it is used,
-  // and `why` says the name differs, so the user can rename or link it.
+  // How the file was found. NearName and Convention are DEDUCED (the blue
+  // dot): used, and `why` says how, so the user can check, rename or link.
+  enum class AssetMatch {
+    None,        // not found
+    Linked,      // Asset::filePath
+    Exact,       // category folder + the asset's exact name
+    NearName,    // the name written another way, or one typo apart
+    Convention,  // the studio's naming convention, CODE_TYPE_name_Vn
+  };
   QString resolveAssetFile(const Asset &a, QString *why = nullptr,
                            QHash<QString, QFileInfoList> *dirCache = nullptr,
-                           bool *nearMatch = nullptr) const;
+                           AssetMatch *match = nullptr) const;
+  // The code of an asset type in the studio's file names (PS props, BG
+  // backgrounds, CH characters, FX effects — Franco, 2026-09-27); empty for
+  // a type without one.
+  static QString assetTypeFileCode(const QString &type);
   // The name as the near-match compares it: lower case, no accents, letters
   // and digits only. «LIBRO FAVOLE», «libro_favole», «Libro-Favole» →
   // «librofavole».
@@ -589,6 +605,38 @@ public:
   void    setResolution(const QString &s) { m_resolution = s; }
   QString namingPattern() const { return m_namingPattern; }
   void    setNamingPattern(const QString &s) { m_namingPattern = s; }
+  // The episode number as set, or read from the episode name when it starts
+  // with the code followed by digits: code CS26 + «CS2606_MESSINA» → «06».
+  QString episodeNumber() const { return m_episodeNumber; }
+  void    setEpisodeNumber(const QString &s) { m_episodeNumber = s; }
+  QString effectiveEpisodeNumber() const;
+  // Only the part read from the episode name (empty if it cannot be read).
+  // The tracker saves the field EMPTY when it equals this, or «06» would be
+  // frozen and stay 06 when the episode becomes CS2607.
+  QString derivedEpisodeNumber() const;
+  // The asset files' convention: as set, or the default below. Tokens: those
+  // of the naming pattern plus {EPNUM}, {TYPE} (PS BG CH FX) and {NAME} (the
+  // asset's name, lower case, words joined by «-»).
+  static QString defaultAssetFilePattern() {
+    return "{CODE}{EPNUM}_{TYPE}_{NAME}_V{VER}";
+  }
+  QString assetFilePattern() const { return m_assetFilePattern; }
+  void    setAssetFilePattern(const QString &s) { m_assetFilePattern = s; }
+  // The file name the convention gives an asset (no folder): BACCHETTA MAGICA,
+  // version 1, «psd» → «CS2606_PS_bacchetta-magica_V1.psd».
+  QString assetFileName(const Asset &a, int version, const QString &suffix) const;
+  // Reads a file's base name with the convention for asset `a`'s type: the
+  // name part and the version (0 if the pattern has none). False when the file
+  // does not follow it.
+  bool parseAssetFileName(const QString &baseName, const Asset &a,
+                          QString *namePart, int *version) const;
+  // The convention for `a`'s type as an anchored expression (invalid when the
+  // pattern cannot be read back), and a match with it — built once and used
+  // for every file of a folder.
+  QRegularExpression assetFileRegex(const Asset &a) const;
+  static bool matchAssetFileName(const QRegularExpression &re,
+                                 const QString &baseName, QString *namePart,
+                                 int *version);
   // Project team roster (people names) used by the Production Tracker's
   // assignee picker. Project-level metadata (persisted in the .ztoryc for now).
   const QStringList &team() const { return m_team; }

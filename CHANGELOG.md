@@ -23,6 +23,10 @@ cima all'ordine di lavoro (Puppetoonz al prossimo episodio). Prima applicazione 
   dettaglio) e **i nomi quasi uguali** vengono riconosciuti (idea di Franco): usati, segnalati in blu,
   e col clic destro si rinomina il file o lo si collega cosi' com'e'. Piu' props nello stesso PSD: il
   file entra intero, una volta per shot (decisione di Franco: niente livelli per prop).
+- **Convenzione dei nomi dei file degli asset** nella produzione («Episode number», «Asset file
+  names»): Ztoryc riconosce CS2606_PS_bacchetta_V1.psd come BACCHETTA MAGICA e rinomina secondo la
+  convenzione. Dalla review: il numero di episodio dedotto non si congela piu' salvando il campo; la
+  rinomina in due passi torna indietro se fallisce.
 
 ### Fixed
 - Un **push manuale** riportava a WFA dei Done appena messi dal supervisore su Kitsu (incidente vero;

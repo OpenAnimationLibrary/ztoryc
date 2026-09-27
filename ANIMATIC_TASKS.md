@@ -1560,8 +1560,15 @@ Segnale del collegamento nella scheda Assets (27/09): pallino verde = ha il suo 
 cartella+nome, il tooltip dice quale), blu = trovato con un nome QUASI uguale (scritto in altro modo —
 maiuscole, spazi, trattini, accenti — o una lettera di differenza all'interno; mai un pezzo in piu'
 come _v03, mai una cifra, mai il nome o il file di un altro asset): usato anche all'export, e col
-clic destro «Rename the file…» o «Link … as it is»; rosso = nessun file. Idea di Franco. Da fare
-(facoltativo): mostrare i quasi-uguali anche nel dialogo di controllo prima dell'export.
+clic destro «Rename the file…» o «Link … as it is»; rosso = nessun file. Idea di Franco. NON si
+mostrano nel dialogo di controllo prima dell'export (Franco, 27/09: non serve).
+**Convenzione dei nomi dei file degli asset (27/09 notte):** nella scheda Project due campi nuovi,
+«Episode number» ({EPNUM}; vuoto = letto dal nome dell'episodio, CS26 + CS2606_MESSINA → 06) e «Asset
+file names» (default `{CODE}{EPNUM}_{TYPE}_{NAME}_V{VER}`; {TYPE} PS/BG/CH/FX, {NAME} minuscolo con
+«-»). Serve a RICONOSCERE (CS2606_PS_bacchetta_V1.psd → BACCHETTA MAGICA, in blu; il nome esatto
+secondo convenzione → verde; versione piu' alta, psd prima di png; backup `~` e .af ignorati) e a
+RINOMINARE (clic destro, secondo la convenzione della produzione). I file con piu' props (PS03-06)
+restano al collegamento a mano. Provato su un banco con i file veri della cartella props di CS2606.
 
 ### Automazione degli status e Sync con Kitsu — cio' che resta (il fatto e' nell'archivio)
 

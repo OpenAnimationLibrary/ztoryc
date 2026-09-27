@@ -51,6 +51,8 @@ class ZtoryProductionPanel final : public TPanel {
   QLineEdit    *m_codeEdit = nullptr;      // short project code (Kitsu code, {CODE} token)
   QComboBox    *m_techCombo = nullptr;
   QLineEdit    *m_patternEdit = nullptr;   // B3d: naming pattern
+  QLineEdit    *m_epNumEdit = nullptr;          // Ztoryc: episode number, {EPNUM}
+  QLineEdit    *m_assetPatternEdit = nullptr;   // Ztoryc: asset files' convention
   QLabel       *m_kitsuLabel = nullptr;    // M5: Kitsu link status
   QPushButton  *m_kitsuConnectBtn = nullptr; // Connect… / Kitsu settings…
   bool          m_projLoading = false;
@@ -135,7 +137,7 @@ private:
   // Il PSD da riggare di un personaggio (importato alla creazione della sua scena).
   bool linkAssetRigPsdInteractive(int assetIndex);
   // Renames a nearly-matching file to the asset's exact name (asks first).
-  void renameAssetFile(int row, const QString &file);
+  void renameAssetFile(int row, const QString &file, const QString &newName);
   // Opzioni PSD di UN asset. Registra solo cio' che differisce dal
   // default di progetto, cosi' cambiare il default continua ad arrivare
   // qui: salvare anche i campi uguali li congelerebbe.

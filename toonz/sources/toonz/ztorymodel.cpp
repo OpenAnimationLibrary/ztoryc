@@ -677,22 +677,101 @@ static bool oneTypoApart(const QString &a, const QString &b) {
   return false;
 }
 
+static QString fileNamePart(const QString &name);  // defined with the naming tokens
+
+QString ZtoryModel::assetTypeFileCode(const QString &type) {
+  if (type.compare("Prop", Qt::CaseInsensitive) == 0) return "PS";
+  if (type.compare("Environment", Qt::CaseInsensitive) == 0) return "BG";
+  if (isCharacterType(type)) return "CH";
+  if (type.compare("FX", Qt::CaseInsensitive) == 0) return "FX";
+  return QString();
+}
+
+namespace {
+
+// Not asset files: backups, hidden files, the painting apps' own documents.
+bool isAssetCandidate(const QFileInfo &fi) {
+  const QString n = fi.fileName();
+  if (n.startsWith('.') || n.endsWith('~')) return false;
+  static const QStringList skip = {"af", "afdesign", "afphoto", "kra", "tmp",
+                                   "bak", "db"};
+  return !skip.contains(fi.suffix().toLower());
+}
+
+// When the same drawing exists in several formats, the one to import.
+int formatRank(const QString &suffix) {
+  static const QStringList order = {"psd", "tlv", "pli", "tif", "tiff",
+                                    "png", "jpg", "jpeg"};
+  const int i = order.indexOf(suffix.toLower());
+  return i < 0 ? order.size() : i;
+}
+
+// The words of a name, as the convention compares them: lower case, no
+// accents, letters and digits only. «Bacchetta Magica» → {bacchetta, magica}.
+QSet<QString> nameWords(const QString &name) {
+  QSet<QString> words;
+  QString w;
+  for (const QChar &c : name.normalized(QString::NormalizationForm_D)) {
+    if (c.isLetterOrNumber()) w += c.toLower();
+    else if (c.category() != QChar::Mark_NonSpacing) {
+      if (!w.isEmpty()) words.insert(w);
+      w.clear();
+    }
+  }
+  if (!w.isEmpty()) words.insert(w);
+  return words;
+}
+
+// The studio's convention CODE_TYPE_name_Vn (Franco, 2026-09-27):
+// «CS2606_PS_bacchetta_V1» → name «bacchetta», version 1. The type code is the
+// first or second token; the version is optional. False when the file does not
+// follow it for this type code.
+bool parseConventionName(const QString &base, const QString &typeCode,
+                         QString *name, int *version) {
+  static const QRegularExpression sep("[_\\s]+");
+  static const QRegularExpression verRe("^[Vv](\\d+)$");
+  QStringList tok = base.split(sep, Qt::SkipEmptyParts);
+  int t = -1;
+  for (int i = 0; i < qMin(2, tok.size()); ++i)
+    if (tok[i].compare(typeCode, Qt::CaseInsensitive) == 0) { t = i; break; }
+  if (t < 0) return false;
+  tok = tok.mid(t + 1);
+  *version = 0;
+  if (!tok.isEmpty()) {
+    const QRegularExpressionMatch v = verRe.match(tok.last());
+    if (v.hasMatch()) {
+      *version = v.captured(1).toInt();
+      tok.removeLast();
+    }
+  }
+  if (tok.isEmpty()) return false;
+  *name = tok.join(' ');
+  return true;
+}
+
+}  // namespace
+
 QString ZtoryModel::resolveAssetFile(const Asset &a, QString *why,
                                      QHash<QString, QFileInfoList> *dirCache,
-                                     bool *nearMatch) const {
-  if (nearMatch) *nearMatch = false;
+                                     AssetMatch *match) const {
+  if (match) *match = AssetMatch::None;
   auto fail = [&](const QString &msg) {
     if (why) *why = msg;
     return QString();
   };
+  auto found = [&](const QString &file, AssetMatch how, const QString &msg) {
+    if (why) *why = msg;
+    if (match) *match = how;
+    return file;
+  };
   // 1. Il legame esplicito VINCE sempre. E' l'unica risposta che non e' una
   //    supposizione, quindi non si discute e non si cerca oltre.
   if (!a.filePath.isEmpty()) {
-    if (QFile::exists(a.filePath)) { if (why) why->clear(); return a.filePath; }
+    if (QFile::exists(a.filePath)) return found(a.filePath, AssetMatch::Linked, QString());
     return fail(tr("linked file is missing: %1").arg(a.filePath));
   }
 
-  // 2. Altrimenti la convenzione: cartella della categoria + nome dell'asset.
+  // 2. Altrimenti la cartella della categoria.
   const QString dir = assetDirForType(a.type);
   if (dir.isEmpty())
     return fail(ZtoryModel::isCharacterType(a.type)
@@ -700,74 +779,152 @@ QString ZtoryModel::resolveAssetFile(const Asset &a, QString *why,
                     : tr("no folder set for type %1").arg(a.type));
   if (!QDir(dir).exists()) return fail(tr("folder not found: %1").arg(dir));
 
-  // Corrispondenza sul NOME BASE, senza distinzione di maiuscole, con qualunque
-  // estensione. Volutamente NON si accettano prefissi o suffissi: «macchina»
-  // non deve pescare «macchina_v03» ne' «macchina_rotta», perche' sceglierne
-  // uno a caso e' peggio che non trovarlo — l'errore si vedrebbe solo in
-  // render, giorni dopo.
-  QStringList hits;
   QFileInfoList listed;
   if (!dirCache || !dirCache->contains(dir)) {
     listed = QDir(dir).entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
     if (dirCache) dirCache->insert(dir, listed);
   }
-  const QFileInfoList &entries = dirCache ? (*dirCache)[dir] : listed;
-  // Both names in the same Unicode form: macOS often stores file names
-  // decomposed (NFD), an asset name typed in the app is composed (NFC) —
-  // «Città» would not match itself, and turn blue for nothing.
+  const QFileInfoList &all = dirCache ? (*dirCache)[dir] : listed;
+  QFileInfoList entries;  // backups and apps' documents are not asset files
+  for (const QFileInfo &fi : all)
+    if (isAssetCandidate(fi)) entries << fi;
+
+  // 2a. The exact name, case aside, any extension. Both names in the same
+  //     Unicode form: macOS often stores file names decomposed (NFD).
+  //     Volutamente NON si accettano prefissi o suffissi qui: «macchina» non
+  //     deve pescare «macchina_v03» ne' «macchina_rotta».
+  QStringList hits;
   const QString nameNfc = a.name.normalized(QString::NormalizationForm_C);
   for (const QFileInfo &fi : entries)
     if (fi.completeBaseName()
             .normalized(QString::NormalizationForm_C)
             .compare(nameNfc, Qt::CaseInsensitive) == 0)
       hits << fi.absoluteFilePath();
-
-  // Nearly the name (Franco, 2026-09-27): written another way — case,
-  // spaces, dashes, underscores, accents — or one typo apart. Used, and said,
-  // so it can be renamed or linked. A piece added (_v03, _old) is not near.
-  if (hits.isEmpty()) {
-    const QString key = assetNameKey(a.name);
-    // Files that belong to ANOTHER asset — its name, or its link — are never
-    // near for this one: «LIBRI» must not take «LIBRO.psd» when LIBRO is a
-    // prop of its own (one letter apart, two different things).
-    QSet<QString> othersKeys, othersFiles;
-    for (const Asset &o : m_assets) {
-      if (o.uuid == a.uuid) continue;
-      othersKeys.insert(assetNameKey(o.name));
-      if (!o.filePath.isEmpty())
-        othersFiles.insert(QFileInfo(o.filePath).absoluteFilePath().toLower());
-    }
-    QStringList nearHits;
-    for (const QFileInfo &fi : entries) {
-      const QString k = assetNameKey(fi.completeBaseName());
-      if (k.isEmpty() || key.isEmpty()) continue;
-      if (othersKeys.contains(k) ||
-          othersFiles.contains(fi.absoluteFilePath().toLower()))
-        continue;
-      if (k == key || (key.size() >= 5 && oneTypoApart(k, key)))
-        nearHits << fi.absoluteFilePath();
-    }
-    if (nearHits.size() == 1) {
-      if (why)
-        *why = tr("the file's name differs: «%1»")
-                   .arg(QFileInfo(nearHits.first()).fileName());
-      if (nearMatch) *nearMatch = true;
-      return nearHits.first();
-    }
-    if (nearHits.size() > 1)
-      return fail(tr("%1 files with a name like «%2» in %3 — link the right one")
-                      .arg(nearHits.size()).arg(a.name, dir));
-    return fail(tr("no file named «%1» in %2").arg(a.name, dir));
-  }
-  // 3. Ambiguo: NON si indovina. Due file con lo stesso nome e estensione
-  //    diversa (macchina.tlv e macchina.psd) sono una scelta dell'utente, non
-  //    nostra; si chiede il legame esplicito.
+  // Ambiguo: NON si indovina. Due file con lo stesso nome e estensione diversa
+  // (macchina.tlv e macchina.psd) sono una scelta dell'utente.
   if (hits.size() > 1)
     return fail(tr("%1 files named «%2» in %3 — link the right one")
                     .arg(hits.size()).arg(a.name, dir));
+  if (hits.size() == 1) return found(hits.first(), AssetMatch::Exact, QString());
 
-  if (why) why->clear();
-  return hits.first();
+  // Files that belong to ANOTHER asset — its name, or its link — are never
+  // deduced for this one: «LIBRI» must not take «LIBRO.psd» when LIBRO is a
+  // prop of its own. (Only here: an exact name needs none of this.)
+  QSet<QString> othersKeys, othersFiles;
+  QList<QSet<QString>> othersWords;  // same type: for the convention
+  for (const Asset &o : m_assets) {
+    if (o.uuid == a.uuid) continue;
+    othersKeys.insert(assetNameKey(o.name));
+    if (o.type.compare(a.type, Qt::CaseInsensitive) == 0)
+      othersWords << nameWords(o.name);
+    if (!o.filePath.isEmpty())
+      othersFiles.insert(QFileInfo(o.filePath).absoluteFilePath().toLower());
+  }
+  auto belongsToOther = [&](const QFileInfo &fi) {
+    return othersFiles.contains(fi.absoluteFilePath().toLower());
+  };
+
+  // 2b. Nearly the name (Franco, 2026-09-27): written another way — case,
+  //     spaces, dashes, underscores, accents — or one typo apart.
+  const QString key = assetNameKey(a.name);
+  QStringList nearHits;
+  for (const QFileInfo &fi : entries) {
+    const QString k = assetNameKey(fi.completeBaseName());
+    if (k.isEmpty() || key.isEmpty()) continue;
+    if (othersKeys.contains(k) || belongsToOther(fi)) continue;
+    if (k == key || (key.size() >= 5 && oneTypoApart(k, key)))
+      nearHits << fi.absoluteFilePath();
+  }
+  if (nearHits.size() > 1)
+    return fail(tr("%1 files with a name like «%2» in %3 — link the right one")
+                    .arg(nearHits.size()).arg(a.name, dir));
+  if (nearHits.size() == 1)
+    return found(nearHits.first(), AssetMatch::NearName,
+                 tr("the file's name differs: «%1»")
+                     .arg(QFileInfo(nearHits.first()).fileName()));
+
+  // 2c. The studio's naming convention (Franco, 2026-09-27): the production's
+  //     («Asset file names»), then a tolerant CODE_TYPE_name_Vn. The file is
+  //     the asset's if every word of its name is in the asset's (or the name
+  //     is nearly the asset's) and it fits NO other asset of the type. Files
+  //     with the asset's whole name come first; then the highest version;
+  //     then the format to import (psd before png).
+  const QString code = assetTypeFileCode(a.type);
+  if (code.isEmpty()) return fail(tr("no file named «%1» in %2").arg(a.name, dir));
+  const QRegularExpression convRe = assetFileRegex(a);  // compiled once
+  const QSet<QString> assetWords = nameWords(a.name);
+  struct Cand {
+    QFileInfo fi;
+    QString part, nameKey;
+    int version;
+    bool byPattern, wholeName;
+  };
+  QList<Cand> cands;
+  for (const QFileInfo &fi : entries) {
+    QString part;
+    int version     = 0;
+    const bool byPattern =
+        matchAssetFileName(convRe, fi.completeBaseName(), &part, &version);
+    if (!byPattern &&
+        !parseConventionName(fi.completeBaseName(), code, &part, &version))
+      continue;
+    const QSet<QString> fileWords = nameWords(part);
+    if (fileWords.isEmpty()) continue;
+    const QString partKey = assetNameKey(part);
+    const bool fits = assetWords.contains(fileWords) || partKey == key ||
+                      (key.size() >= 5 && oneTypoApart(partKey, key));
+    if (!fits || belongsToOther(fi)) continue;
+    bool shared = false;  // «libro» fits LIBRO FAVOLE and LIBRO FORMULA 1
+    for (const QSet<QString> &ow : othersWords)
+      if (ow.contains(fileWords)) { shared = true; break; }
+    if (shared) continue;
+    QStringList sorted = fileWords.values();
+    sorted.sort();
+    cands << Cand{fi, part, sorted.join(' '), version, byPattern,
+                  fileWords == assetWords || partKey == key};
+  }
+  // A file with the asset's whole name beats a partial one: «bacchetta» V1
+  // and «bacchetta-magica» V2 for BACCHETTA MAGICA are not ambiguous.
+  bool anyWhole = false;
+  for (const Cand &c : cands) anyWhole = anyWhole || c.wholeName;
+  if (anyWhole)
+    for (int i = cands.size() - 1; i >= 0; --i)
+      if (!cands[i].wholeName) cands.removeAt(i);
+  if (!cands.isEmpty()) {
+    QSet<QString> names;
+    for (const Cand &c : cands) names.insert(c.nameKey);
+    if (names.size() > 1)
+      return fail(tr("%1 files fit «%2» by the naming convention in %3 — link "
+                     "the right one")
+                      .arg(cands.size()).arg(a.name, dir));
+    const Cand *best = &cands.first();
+    for (const Cand &c : cands)
+      if (c.version > best->version ||
+          (c.version == best->version &&
+           formatRank(c.fi.suffix()) < formatRank(best->fi.suffix())))
+        best = &c;
+    for (const Cand &c : cands)  // a true tie: not ours to choose
+      if (&c != best && c.version == best->version &&
+          formatRank(c.fi.suffix()) == formatRank(best->fi.suffix()))
+        return fail(tr("%1 and %2 both fit «%3» — link the right one")
+                        .arg(best->fi.fileName(), c.fi.fileName(), a.name));
+    QSet<int> versions;
+    for (const Cand &c : cands) versions.insert(c.version);
+    // Named EXACTLY by the production's convention: not a deduction, green.
+    // Only by the production's pattern — the tolerant rule also reads other
+    // episodes' files (CS2605_…), which are not «exactly» anything.
+    const bool exactName =
+        best->byPattern && fileNamePart(best->part) == fileNamePart(a.name);
+    QString msg = exactName ? QString()
+                            : tr("found by the naming convention: «%1»")
+                                  .arg(best->fi.fileName());
+    if (versions.size() > 1)
+      msg += (msg.isEmpty() ? QString() : QString(" ")) +
+             tr("(the latest of %1 versions)").arg(versions.size());
+    return found(best->fi.absoluteFilePath(),
+                 exactName ? AssetMatch::Exact : AssetMatch::Convention, msg);
+  }
+  return fail(tr("no file named «%1» in %2").arg(a.name, dir));
 }
 
 QString ZtoryModel::assetDirForType(const QString &type) const {
@@ -1024,6 +1181,8 @@ void ZtoryModel::resetProjectLevelDefaults() {
   m_title.clear();
   m_episode.clear();
   m_namingPattern.clear();
+  m_episodeNumber.clear();
+  m_assetFilePattern.clear();
   m_defaultTechnique.clear();
   m_team.clear();
   m_assets.clear();
@@ -1163,6 +1322,10 @@ void ZtoryModel::saveProjectDb() {
   xml.writeAttribute("defaultTechnique", m_defaultTechnique);
   if (!m_namingPattern.isEmpty())
     xml.writeAttribute("namingPattern", m_namingPattern);
+  if (!m_episodeNumber.isEmpty())
+    xml.writeAttribute("episodeNumber", m_episodeNumber);
+  if (!m_assetFilePattern.isEmpty())
+    xml.writeAttribute("assetFilePattern", m_assetFilePattern);
   // Opt-in Kitsu: the sync UI only shows when the project enables it (chosen at
   // creation). The Production Tracker itself is always available.
   if (m_useKitsu) xml.writeAttribute("useKitsu", "1");
@@ -1347,6 +1510,8 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
         m_defaultTechnique = a.value("defaultTechnique").toString();
       if (a.hasAttribute("namingPattern"))
         m_namingPattern = a.value("namingPattern").toString();
+      m_episodeNumber    = a.value("episodeNumber").toString();
+      m_assetFilePattern = a.value("assetFilePattern").toString();
       m_useKitsu = (a.value("useKitsu").toString() == "1");
       // Kitsu (M5) binding + mirrored metadata.
       m_kitsuProjectId   = a.value("kitsuProjectId").toString();
@@ -1752,6 +1917,95 @@ QString ZtoryModel::effectiveCode() const {
   if (caps.size() >= 2) return caps.left(4);
 
   return prod.left(3).toUpper();
+}
+
+QString ZtoryModel::effectiveEpisodeNumber() const {
+  if (!m_episodeNumber.trimmed().isEmpty()) return m_episodeNumber.trimmed();
+  return derivedEpisodeNumber();
+}
+
+QString ZtoryModel::derivedEpisodeNumber() const {
+  const QString code = effectiveCode();
+  if (code.isEmpty() || !m_episode.startsWith(code, Qt::CaseInsensitive))
+    return QString();
+  const QRegularExpressionMatch d =
+      QRegularExpression("^(\\d+)").match(m_episode.mid(code.size()));
+  return d.hasMatch() ? d.captured(1) : QString();
+}
+
+// The tokens of the asset files' convention that come from the project.
+static QMap<QString, QString> projectTokens(const ZtoryModel *m) {
+  QMap<QString, QString> tok;
+  tok["PROD"]   = m->production();
+  tok["CODE"]   = m->effectiveCode();
+  tok["SEASON"] = m->season();
+  tok["EP"]     = m->episode();
+  tok["EPNUM"]  = m->effectiveEpisodeNumber();
+  return tok;
+}
+
+// «Bacchetta Magica» → «bacchetta-magica»: the asset's name as it sits in the
+// file names (Franco, 2026-09-27: lower case, words joined by a dash).
+static QString fileNamePart(const QString &name) {
+  QStringList words;
+  QString w;
+  for (const QChar &c : name.normalized(QString::NormalizationForm_C)) {
+    if (c.isLetterOrNumber()) w += c.toLower();
+    else if (!w.isEmpty()) { words << w; w.clear(); }
+  }
+  if (!w.isEmpty()) words << w;
+  return words.join('-');
+}
+
+QString ZtoryModel::assetFileName(const Asset &a, int version,
+                                  const QString &suffix) const {
+  QMap<QString, QString> tok = projectTokens(this);
+  tok["TYPE"] = assetTypeFileCode(a.type);
+  tok["NAME"] = fileNamePart(a.name);
+  tok["VER"]  = QString::number(version);
+  const QString pat = m_assetFilePattern.trimmed().isEmpty()
+                          ? defaultAssetFilePattern()
+                          : m_assetFilePattern.trimmed();
+  const QString base = resolvePattern(pat, tok);
+  return suffix.isEmpty() ? base : base + "." + suffix;
+}
+
+QRegularExpression ZtoryModel::assetFileRegex(const Asset &a) const {
+  const QString pat = m_assetFilePattern.trimmed().isEmpty()
+                          ? defaultAssetFilePattern()
+                          : m_assetFilePattern.trimmed();
+  // One {NAME}, at most one {VER}: repeated named groups make no valid
+  // expression, and a convention without a name recognises nothing.
+  if (pat.count("{NAME}") != 1 || pat.count(QRegularExpression("\\{VER(:\\d+)?\\}")) > 1)
+    return QRegularExpression();
+  // The pattern resolved with markers where the name and the version go, then
+  // turned into an anchored expression: one grammar for making names and for
+  // reading them.
+  QMap<QString, QString> tok = projectTokens(this);
+  tok["TYPE"] = assetTypeFileCode(a.type);
+  tok["NAME"] = "QQZNAMEQQZ";
+  tok["VER"]  = "QQZVERQQZ";
+  QString rx = QRegularExpression::escape(resolvePattern(pat, tok));
+  rx.replace("QQZNAMEQQZ", "(?<name>.+?)");
+  rx.replace("QQZVERQQZ", "(?<ver>\\d+)");
+  return QRegularExpression("^" + rx + "$",
+                            QRegularExpression::CaseInsensitiveOption);
+}
+
+bool ZtoryModel::matchAssetFileName(const QRegularExpression &re,
+                                    const QString &baseName, QString *namePart,
+                                    int *version) {
+  if (!re.isValid() || re.pattern().isEmpty()) return false;
+  const QRegularExpressionMatch mt = re.match(baseName);
+  if (!mt.hasMatch()) return false;
+  *namePart = mt.captured("name");
+  *version  = mt.captured("ver").toInt();
+  return true;
+}
+
+bool ZtoryModel::parseAssetFileName(const QString &baseName, const Asset &a,
+                                    QString *namePart, int *version) const {
+  return matchAssetFileName(assetFileRegex(a), baseName, namePart, version);
 }
 
 QString ZtoryModel::defaultNamingPattern() const {
