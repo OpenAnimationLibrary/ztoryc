@@ -2207,10 +2207,10 @@ static void pasteRasterImageInCell(int row, int col,
 //-----------------------------------------------------------------------------
 // choose pasting behavior by preference option
 void TCellSelection::doPaste() {
-  if (Preferences::instance()->getPasteCellsBehavior() ==
-      0)  // insert paste whole contents of copied cells
+  if (Preferences::instance()->getPasteCellsBehavior() == 0 ||
+      !dynamic_cast<const TCellData *>(QApplication::clipboard()->mimeData()))
     pasteCells();
-  else  // overwrite paste numbers, consistent with QuickChecker
+  else
     overwritePasteNumbers();
 }
 
@@ -2221,6 +2221,12 @@ void TCellSelection::pasteCells() {
   getSelectedCells(r0, c0, r1, c1);
   QClipboard *clipboard     = QApplication::clipboard();
   const QMimeData *mimeData = clipboard->mimeData();
+  const StrokesData *strokesData = dynamic_cast<const StrokesData *>(mimeData);
+  std::unique_ptr<StrokesData> transferredStrokes;
+  if (!strokesData) {
+    transferredStrokes.reset(StrokesData::fromClipboard(mimeData));
+    strokesData = transferredStrokes.get();
+  }
   TXsheet *xsh              = TApp::instance()->getCurrentXsheet()->getXsheet();
   XsheetViewer *viewer      = TApp::instance()->getCurrentXsheetViewer();
 
@@ -2397,8 +2403,7 @@ void TCellSelection::pasteCells() {
     TUndoManager::manager()->add(
         new PasteDrawingsInCellUndo(level, frameIds, r0, c0));
   }
-  if (const StrokesData *strokesData =
-          dynamic_cast<const StrokesData *>(mimeData)) {
+  if (strokesData) {
     if (isEmpty())  // Se la selezione delle celle e' vuota ritorno.
       return;
 
@@ -2494,7 +2499,7 @@ void TCellSelection::pasteCells() {
   // See if the clipboard contains rasterData
   const RasterImageData *rasterImageData =
       dynamic_cast<const RasterImageData *>(mimeData);
-  if (rasterImageData || clipImage.height() > 0) {
+  if (!strokesData && (rasterImageData || clipImage.height() > 0)) {
     if (isEmpty())  // Nothing selected.
       return;
 
@@ -3956,6 +3961,9 @@ void TCellSelection::dPasteCells() {
   TXsheet *xsh              = TApp::instance()->getCurrentXsheet()->getXsheet();
   QClipboard *clipboard     = QApplication::clipboard();
   const QMimeData *mimeData = clipboard->mimeData();
+  std::unique_ptr<StrokesData> transferredStrokes;
+  if (!dynamic_cast<const StrokesData *>(mimeData))
+    transferredStrokes.reset(StrokesData::fromClipboard(mimeData));
   if (DYNAMIC_CAST(TCellData, cellData, mimeData)) {
     if (!cellData->canChange(xsh, c0)) {
       TUndoManager::manager()->endBlock();
@@ -3979,7 +3987,8 @@ void TCellSelection::dPasteCells() {
            it != frameIds.end(); ++it)
         createNewDrawing(xsh, r++, c0, level->getType());
     }
-  } else if (DYNAMIC_CAST(StrokesData, strokesData, mimeData)) {
+  } else if (dynamic_cast<const StrokesData *>(mimeData) ||
+             transferredStrokes) {
     createNewDrawing(xsh, r0, c0, PLI_XSHLEVEL);
   } else if (DYNAMIC_CAST(ToonzImageData, toonzImageData, mimeData)) {
     createNewDrawing(xsh, r0, c0, TZP_XSHLEVEL);
