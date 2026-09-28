@@ -8348,6 +8348,15 @@ void ZtoryAnimaticPanel::keepPlayheadVisible(int frame) {
       hb->setValue(x - kLabelW - pad);  // pagina avanti: riparte da sinistra
     else if (x < v + kLabelW)
       hb->setValue(qMax(0, x - kLabelW - pad));  // loop: torna indietro
+  } else if (QApplication::mouseButtons() != Qt::NoButton) {
+    // Testina trascinata a mano (trim, scrub): la vista la segue di quanto
+    // basta, come prima dello scatto a pagina. Lo scatto al centro, sotto il
+    // mouse, spostava i fotogrammi mentre si cercava il punto di taglio
+    // (Franco, 2026-09-28).
+    if (x > v + w - pad)
+      hb->setValue(x - w + pad);
+    else if (x < v + kLabelW)
+      hb->setValue(qMax(0, x - kLabelW));
   } else if (x < v + kLabelW || x > v + w - pad) {
     hb->setValue(qMax(0, x - w / 2));  // fuori vista da ferma: al centro
   }
