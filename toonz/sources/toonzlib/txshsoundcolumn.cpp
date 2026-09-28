@@ -333,15 +333,22 @@ const TXshCell &TXshSoundColumn::getCell(int row, bool implicitLookup,
   }
 
   if (!l) return emptyCell;
-  TXshSoundLevel *soundLevel = l->getSoundLevel();
-  TXshCell *cell = new TXshCell(soundLevel, TFrameId(row - l->getStartFrame()));
-  // The new cell adds a reference to the TXshSoundLevel;
-  // since the cells of the TXshSoundColumn are not persistent structures
-  // but are dynamic structures (they are recreated every time) I have to take
-  // care of making the release otherwise the TXshSoundLevel is never thrown
-  // away.
-  soundLevel->release();
-  return *cell;
+  // Ztoryc: the cells of a sound column are not stored, they are made on
+  // demand — but this used to make each one with `new` and never delete it
+  // (the manual release() below it only compensated the level's reference
+  // count). One leaked 48-byte cell per call: an xsheet scan over three sound
+  // columns of 7,883 frames lost a megabyte, and a working session reached
+  // 32 GB, 87 million cells (measured with `heap`, 2026-09-28). A small ring
+  // of reused cells per thread: the reference returned stays valid for the
+  // next kRing calls, well beyond what a caller holds, and each slot holds a
+  // real reference to its level, dropped when the slot is reused.
+  static const int kRing = 64;
+  thread_local TXshCell ring[kRing];
+  thread_local int next = 0;
+  TXshCell &cell = ring[next];
+  next           = (next + 1) % kRing;
+  cell           = TXshCell(l->getSoundLevel(), TFrameId(row - l->getStartFrame()));
+  return cell;
 }
 
 //-----------------------------------------------------------------------------
