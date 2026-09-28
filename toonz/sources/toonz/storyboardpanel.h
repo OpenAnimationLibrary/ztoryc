@@ -346,6 +346,15 @@ struct Shot {
   void applySharedSelection();
   int  currentShotIndex() const;
   void detectAndUpdatePanels(int shotIdx);
+  // After a shot operation: bring m_shots in line with the scene's shot
+  // columns by IDENTITY (the sub-scene each one exposes) — keep, move, add,
+  // drop — instead of rebuilding the whole Board. false = not attempted
+  // (ambiguous or unsafe): the caller does the full rebuild.
+  bool reconcileShotsWithScene(TXsheet *xsh, const std::vector<int> &childCols,
+                               const std::vector<TXshChildLevel *> &childLevels);
+  // true when m_shots matches the scene's shot columns one to one.
+  bool boardMatchesScene(const std::vector<int> &childCols,
+                         const std::vector<TXshChildLevel *> &childLevels) const;
   void assignKeepNumbers(int insertAt);
   QString ztoryPath() const;
   void    syncWidgetsToData();

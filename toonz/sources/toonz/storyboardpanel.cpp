@@ -2838,26 +2838,45 @@ void StoryboardPanel::ensureShotUuids() {
     }
   };
 
+  // The Board's uuid only: taking the model's at the same POSITION gave a new
+  // shot (a clone, just pasted) the uuid of whichever shot the stale model
+  // list had there. A legacy shot without one got it from pushTrackingToBoard,
+  // which saveZtoryc now runs first. The model entry follows the Board's.
   int n = qMin((int)m_shots.size(), m->shotCount());
-  for (int i = 0; i < n; i++) {
-    QString &bu = m_shots[i].data.uuid;
-    QString &mu = m->shot(i).uuid;
-    QString id  = !bu.isEmpty() ? bu : mu;
-    resolveUuid(id);
-    bu = mu = id;
-  }
-  for (int i = n; i < (int)m_shots.size(); i++) {
+  for (int i = 0; i < (int)m_shots.size(); i++) {
     QString &bu = m_shots[i].data.uuid;
     resolveUuid(bu);
+    if (i < n) m->shot(i).uuid = bu;
   }
 }
 
 void StoryboardPanel::pushTrackingToBoard() {
+  // By UUID, not by position. Nothing keeps the model's shot list in step
+  // with the Board's between two saves (no ZtoryModel::addShot/removeShot on
+  // any shot operation): after a delete or a merge the model still has the old
+  // list, and copying by index handed every later shot the tasks of the one
+  // before it. The index is used only for a shot with no uuid yet, and only
+  // when the two lists have the same length (a scene from before the uuids).
   ZtoryModel *m = ZtoryModel::instance();
-  int n = qMin((int)m_shots.size(), m->shotCount());
-  for (int i = 0; i < n; i++) {
-    const ShotData &md = m->shot(i);
-    ShotData &bd       = m_shots[i].data;
+  QHash<QString, int> byUuid;
+  for (int i = 0; i < m->shotCount(); i++) {
+    const QString &u = m->shot(i).uuid;
+    if (u.isEmpty()) continue;
+    if (byUuid.contains(u))
+      byUuid[u] = -1;  // two model shots claim it: trust neither
+    else
+      byUuid.insert(u, i);
+  }
+  const bool sameLength = m->shotCount() == (int)m_shots.size();
+  for (int i = 0; i < (int)m_shots.size(); i++) {
+    ShotData &bd = m_shots[i].data;
+    int mi       = -1;
+    if (!bd.uuid.isEmpty())
+      mi = byUuid.value(bd.uuid, -1);
+    else if (sameLength)
+      mi = i;
+    if (mi < 0) continue;
+    const ShotData &md = m->shot(mi);
     if (!md.uuid.isEmpty()) bd.uuid = md.uuid;
     bd.technique = md.technique;
     bd.tasks     = md.tasks;
@@ -3253,8 +3272,8 @@ void StoryboardPanel::saveZtoryc() {
   }
   // Make the Board copy reflect the model (tracker edits) before serializing,
   // and guarantee every shot has a stable uuid.
+  pushTrackingToBoard();  // first: it matches the model by uuid
   ensureShotUuids();
-  pushTrackingToBoard();
   for (int si = 0; si < (int)m_shots.size(); si++) {
     const Shot &shot = m_shots[si];
     xml.writeStartElement("shot");
@@ -4604,6 +4623,14 @@ void StoryboardPanel::onModelResequenced() {
     }
   }
 
+  // General case: shots added, removed and moved together (paste, clone, merge,
+  // several at once), and scenes whose shot columns are interleaved with sound
+  // columns, where the two fast paths above never apply. Matched by identity,
+  // so the shots that did not change keep their widgets and previews.
+  if (!boardMatchesScene(childCols, childLevels) &&
+      reconcileShotsWithScene(xsh, childCols, childLevels))
+    return;
+
   bool drifted = (childCols.size() != m_shots.size());
   TStageObjectTree *tree = xsh->getStageObjectTree();
   for (int si = 0; !drifted && si < (int)m_shots.size(); si++) {
@@ -4791,6 +4818,168 @@ void StoryboardPanel::onMergeShots() {
   auto after = captureSnapshot();
   TUndoManager::manager()->add(
       new UndoBoardState(this, tr("Merge Shots"), std::move(before), std::move(after)));
+}
+
+bool StoryboardPanel::boardMatchesScene(
+    const std::vector<int> &childCols,
+    const std::vector<TXshChildLevel *> &childLevels) const {
+  if (m_shots.size() != childLevels.size()) return false;
+  for (int i = 0; i < (int)m_shots.size(); i++)
+    if (m_shots[i].childLevel != childLevels[i] ||
+        m_shots[i].data.xsheetColumn != childCols[i] ||
+        m_shots[i].panels.empty())
+      return false;
+  return true;
+}
+
+bool StoryboardPanel::reconcileShotsWithScene(
+    TXsheet *xsh, const std::vector<int> &childCols,
+    const std::vector<TXshChildLevel *> &childLevels) {
+  if (m_updating || !xsh) return false;
+  ToonzScene *scene = TApp::instance()->getCurrentScene()->getScene();
+  // detectAndUpdatePanels reads the sub-scene from the main xsheet only.
+  if (!scene || scene->getChildStack()->getAncestorCount() > 0) return false;
+  if (m_shots.empty() || childLevels.empty()) return false;
+
+  // Every shot needs an identity. The same sub-scene in several columns (a
+  // shared copy) is matched IN ORDER — its first occurrence with the first,
+  // and so on — which is what loadZtoryc does with the .ztoryc entries. One
+  // copy in the scene used to make this give up for the whole Board (CS2605
+  // has one, 2026-09-28).
+  QHash<TXshChildLevel *, QVector<int>> oldIndex;  // occurrences, in order
+  for (int i = 0; i < (int)m_shots.size(); i++) {
+    TXshChildLevel *cl = m_shots[i].childLevel;
+    if (!cl) return false;
+    oldIndex[cl].push_back(i);
+  }
+  for (TXshChildLevel *cl : childLevels)
+    if (!cl) return false;
+  QHash<TXshChildLevel *, int> taken;  // occurrences already matched
+
+  auto trueDuration = [&](int col) {
+    int ts = 0, td = 0;
+    if (ZtoryShotOps::shotTrueSpan(xsh, col, ts, td)) return td;
+    int r0 = 0, r1 = 0;
+    if (TXshColumn *column = xsh->getColumn(col))
+      column->getRange(r0, r1, /*ignoreLastStop=*/true);
+    return r1 - r0 + 1;
+  };
+
+  // The new list: the shots that stay are MOVED in (data, widgets, previews
+  // and all); the new ones start with one panel and are detected below.
+  std::vector<Shot> next;
+  next.reserve(childLevels.size());
+  std::vector<int> toDetect;
+  std::vector<bool> kept(m_shots.size(), false);
+  ZtoryModel *model = ZtoryModel::instance();
+  for (int j = 0; j < (int)childLevels.size(); j++) {
+    const int col = childCols[j];
+    const int dur = trueDuration(col);
+    const QVector<int> &occ = oldIndex.value(childLevels[j]);
+    int &n                  = taken[childLevels[j]];
+    const int from          = n < occ.size() ? occ[n] : -1;
+    n++;
+    if (from >= 0) {
+      Shot s = std::move(m_shots[from]);
+      kept[from] = true;
+      s.data.xsheetColumn = col;
+      int sum = 0;
+      for (const PanelData &pd : s.data.panels) sum += pd.duration;
+      // Its length changed (the destination of a merge): the panels are
+      // counted again from the sub-scene.
+      if (sum != dur) toDetect.push_back(j);
+      next.push_back(std::move(s));
+    } else {
+      Shot s;
+      s.childLevel        = childLevels[j];
+      s.data.xsheetColumn = col;
+      PanelData pd;
+      pd.duration = dur > 0 ? dur : 24;
+      s.data.panels.push_back(pd);
+      // A shot can arrive already knowing its panels (Send to Board from the
+      // Thumbnail room writes them in the model first) — take them only when
+      // the model entry really is this column.
+      if (j < model->shotCount() && model->shot(j).xsheetColumn == col &&
+          model->shot(j).panels.size() > 1)
+        s.data.panels = model->shot(j).panels;
+      else
+        toDetect.push_back(j);
+      next.push_back(std::move(s));
+    }
+  }
+  const int keptCount = (int)std::count(kept.begin(), kept.end(), true);
+  qWarning("[ZTORY] reconcile: %d shots -> %d (%d kept, %d new, %d gone)",
+           (int)m_shots.size(), (int)next.size(), keptCount,
+           (int)next.size() - keptCount, (int)m_shots.size() - keptCount);
+
+  // The shots that left the scene: their widgets go.
+  for (int i = 0; i < (int)m_shots.size(); i++)
+    if (!kept[i])
+      for (PanelWidget *pw : m_shots[i].panels) ztoryRetirePanelWidget(m_grid, pw);
+  m_shots = std::move(next);
+  m_selectedShotIndex = -1;
+  m_selectedIndices.clear();
+  m_followShot = m_followPanel = -1;
+
+  for (int si = 0; si < (int)m_shots.size(); si++) {
+    Shot &shot = m_shots[si];
+    if (shot.panels.empty())
+      for (int pi = 0; pi < (int)shot.data.panels.size(); pi++)
+        addPanelWidget(si, pi);
+    for (int pi = 0; pi < (int)shot.panels.size(); pi++) {
+      shot.panels[pi]->setShotIndex(si);
+      shot.panels[pi]->setPanelIndex(pi, (int)shot.data.panels.size());
+    }
+  }
+
+  // Keep mode: labels from the column names, as refreshFromScene does — a
+  // fresh column (non-label name) is cleared so renumberAll gives it a
+  // midpoint label.
+  if (!model->autoRenumber()) {
+    const QString pfx      = model->numberingConfig().shotPrefix;
+    TStageObjectTree *tree = xsh->getStageObjectTree();
+    for (Shot &shot : m_shots) {
+      TStageObject *obj =
+          tree ? tree->getStageObject(
+                     TStageObjectId::ColumnId(shot.data.xsheetColumn), false)
+               : nullptr;
+      const QString name =
+          obj ? QString::fromStdString(obj->getName()) : QString();
+      const bool looksLikeLabel = name.startsWith(pfx) &&
+                                  name.length() > pfx.length() &&
+                                  name.at(pfx.length()).isDigit();
+      if (looksLikeLabel) {
+        shot.data.shotLabel  = name;
+        shot.data.shotNumber = name;
+      } else {
+        shot.data.shotLabel.clear();
+      }
+    }
+  }
+  updateNumberingLock();
+  renumberAll();
+  for (int si : toDetect) detectAndUpdatePanels(si);
+  for (int si = 0; si < (int)m_shots.size(); si++) {
+    const int total = trueDuration(m_shots[si].data.xsheetColumn);
+    for (PanelWidget *pw : m_shots[si].panels) pw->setTotalDuration(total);
+  }
+  rebuildGrid();
+  // Tracking data follows each shot by uuid (pushTrackingToBoard), and the
+  // save aligns the model's list with the Board's.
+  saveZtoryc();
+  for (int i = 0; i < (int)m_shots.size(); i++)
+    model->syncShotPanels(i, m_shots[i].data.panels, m_shots[i].data.shotLabel,
+                          m_shots[i].data.xsheetColumn);
+
+  if (!boardMatchesScene(childCols, childLevels)) {
+    qWarning("[ZTORY] reconcile: board does not match the scene afterwards -> "
+             "full rebuild");
+    refreshFromScene();
+  }
+  // New shots' previews, once the grid has its geometry (see the full
+  // rebuild branch in onModelResequenced).
+  QTimer::singleShot(0, this, &StoryboardPanel::onRefreshPreviews);
+  return true;
 }
 
 void StoryboardPanel::onShotInserted(int col) {
@@ -5427,8 +5616,14 @@ void StoryboardPanel::onPasteShot() {
                     newShared.end());
     ZtoryModel::instance()->setSharedClip(std::move(newShared));
   }
-  resequenceXsheet();
-  refreshFromScene();
+  resequenceXsheet();  // onModelResequenced updates the Board (by identity)
+  {
+    // It used to rebuild the whole Board here as well, a second time. Only if
+    // the Board still does not match the scene.
+    std::vector<TXshChildLevel *> levels;
+    const std::vector<int> cols = ztoryShotColumns(xsh, &levels);
+    if (!boardMatchesScene(cols, levels)) refreshFromScene();
+  }
   m_pasteButton->setEnabled(!ZtoryModel::instance()->sharedClip().empty());
 
   auto after = captureSnapshot();
