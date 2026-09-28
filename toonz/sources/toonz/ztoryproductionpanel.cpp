@@ -416,11 +416,11 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
 
   ZtoryModel *m = ZtoryModel::instance();
   connect(m, &ZtoryModel::modelReset,        this, &ZtoryProductionPanel::onModelChanged);
-  connect(m, &ZtoryModel::shotAdded,         this, [this](int) { rebuild(); });
-  connect(m, &ZtoryModel::shotRemoved,       this, [this](int) { rebuild(); });
-  connect(m, &ZtoryModel::shotRemovedAt,     this, [this](int) { rebuild(); });
-  connect(m, &ZtoryModel::shotMoved,         this, [this](int, int) { rebuild(); });
-  connect(m, &ZtoryModel::shotDataChanged,   this, [this](int) { rebuild(); });
+  connect(m, &ZtoryModel::shotAdded,         this, [this](int) { scheduleRebuild(); });
+  connect(m, &ZtoryModel::shotRemoved,       this, [this](int) { scheduleRebuild(); });
+  connect(m, &ZtoryModel::shotRemovedAt,     this, [this](int) { scheduleRebuild(); });
+  connect(m, &ZtoryModel::shotMoved,         this, [this](int, int) { scheduleRebuild(); });
+  connect(m, &ZtoryModel::shotDataChanged,   this, [this](int) { scheduleRebuild(); });
   connect(m, &ZtoryModel::taskStatusChanged, this, [this] { rebuild(); reloadProjectTab(); });
   connect(m, &ZtoryModel::assetsChanged,     this, [this] { rebuildAssets(); });
   connect(m, &ZtoryModel::productionReloaded, this, &ZtoryProductionPanel::onModelChanged);
@@ -2851,6 +2851,15 @@ void ZtoryProductionPanel::applyAssetTaskTypesToType() {
 }
 
 //-----------------------------------------------------------------------------
+
+void ZtoryProductionPanel::scheduleRebuild() {
+  if (m_rebuildScheduled) return;
+  m_rebuildScheduled = true;
+  QTimer::singleShot(0, this, [this] {
+    m_rebuildScheduled = false;
+    rebuild();
+  });
+}
 
 void ZtoryProductionPanel::rebuild() {
   ZtoryModel *m = ZtoryModel::instance();

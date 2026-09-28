@@ -97,6 +97,12 @@ private:
   // Shots tab
   QWidget *buildShotsTab();
   void rebuild();                  // rebuild the shot × task matrix from ZtoryModel
+  // One rebuild when control returns to the event loop, however many model
+  // signals asked for it: a paste of one shot re-syncs EVERY shot's panels,
+  // and each emitted shotDataChanged rebuilt the whole table — two thirds of
+  // a six-second paste (measured with `sample`, 2026-09-28).
+  void scheduleRebuild();
+  bool m_rebuildScheduled = false;
   void editCell(int row, int col); // status/assignee picker for a clicked cell
   // Full-project export: one XLSX with every tab (Shots across all storyboards,
   // Team, Assets, Workflows, Project) sourced from the project DB.

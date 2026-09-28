@@ -238,6 +238,7 @@ static QString stripAlphaPrefix(const QString &s, QString *prefix = nullptr) {
 // Merge helpers defined in ztoryanimatic.cpp (non-static so they can be shared)
 void materializeCells(TXshChildLevel *cl, int duration, bool fillToEnd = false);
 void trimChildXsheetTo(TXshChildLevel *cl, int keepFrames);
+void backupChildForUndo(int col, ZtoryBoardSnap &before);
 void mergeChildXsheetContent(TXshChildLevel *dstCl, TXshChildLevel *srcCl,
                               int dstOffset, int srcDuration);
 
@@ -2230,6 +2231,60 @@ void StoryboardPanel::renumberAll() {
   }
 }
 
+namespace {
+// What the preview of a panel shows: the sub-scene, the panel's frames and
+// camera, its position in the shot (the letter of a camera move counts the
+// moves before it) and the light overlay. Same key = same image: the
+// sub-scene is the same instance, so its drawings are the same.
+QString carryPreviewKey(const TXshChildLevel *cl, const PanelData &pd,
+                        int panelIdx) {
+  if (!cl) return QString();
+  QString k = QString::fromStdWString(cl->getName()) +
+              QString("|%1|%2|%3|%4|%5|%6x%7|")
+                  .arg(panelIdx)
+                  .arg(pd.startFrame)
+                  .arg(pd.duration)
+                  .arg(int(pd.cameraMoveType))
+                  .arg(pd.camRenderFrame)
+                  .arg(pd.camW)
+                  .arg(pd.camH) +
+              pd.cameraMoveLabel;
+  for (int i = 0; i < 6; i++)
+    k += QString("|%1,%2").arg(pd.camA0[i], 0, 'g', 10).arg(pd.camA1[i], 0, 'g', 10);
+  if (pd.hasLight)
+    k += QString("|L%1,%2,%3,%4,%5,%6,").arg(pd.lightTailX).arg(pd.lightTailY)
+             .arg(pd.lightTipX).arg(pd.lightTipY).arg(pd.lightDepth)
+             .arg(pd.lightSpread) + pd.lightColor;
+  return k;
+}
+}  // namespace
+
+void StoryboardPanel::stashPreviewsForCarry() {
+  m_carriedPreviews.clear();
+  for (const Shot &shot : m_shots)
+    for (int pi = 0; pi < (int)shot.panels.size() &&
+                     pi < (int)shot.data.panels.size();
+         pi++) {
+      const PanelWidget *pw = shot.panels[pi];
+      if (!pw || pw->previewPixmap().isNull()) continue;
+      const QString key =
+          carryPreviewKey(shot.childLevel, shot.data.panels[pi], pi);
+      if (!key.isEmpty()) m_carriedPreviews.insert(key, pw->previewPixmap());
+    }
+}
+
+void StoryboardPanel::restoreCarriedPreview(int si, int pi) {
+  if (m_carriedPreviews.isEmpty()) return;
+  if (si < 0 || si >= (int)m_shots.size()) return;
+  Shot &shot = m_shots[si];
+  if (pi < 0 || pi >= (int)shot.panels.size() ||
+      pi >= (int)shot.data.panels.size())
+    return;
+  const QPixmap px = m_carriedPreviews.value(
+      carryPreviewKey(shot.childLevel, shot.data.panels[pi], pi));
+  if (!px.isNull()) shot.panels[pi]->setPreviewPixmap(px);
+}
+
 void StoryboardPanel::clearShots() {
   // Clear the path FIRST so that any saveZtoryc() that fires while widgets are
   // being destroyed (e.g. QTextEdit focusOut events during delete) returns early
@@ -3717,6 +3772,7 @@ void StoryboardPanel::loadZtoryc() {
              << "collapsed" << (int)(totalDur) << "1-frame panels → 1 panel, dur=" << repaired.duration;
   }
 
+  m_widgetsBuiltByLoad = true;  // refreshFromScene does not build them again
   for (int i = 0; i < (int)m_shots.size(); i++) {
     Shot &shot = m_shots[i];
     // Rimuovi tutti i widget esistenti e ricostruisci da data
@@ -3724,6 +3780,7 @@ void StoryboardPanel::loadZtoryc() {
     shot.panels.clear();
     for (int j = 0; j < (int)shot.data.panels.size(); j++) {
       addPanelWidget(i, j);
+      restoreCarriedPreview(i, j);
       shot.panels[j]->setDuration(shot.data.panels[j].duration);
       shot.panels[j]->setDialog(shot.data.panels[j].dialog);
       shot.panels[j]->setAction(shot.data.panels[j].action);
@@ -4216,6 +4273,8 @@ void StoryboardPanel::detectAndUpdatePanels(int shotIdx) {
   std::set<int> boundaries;
   boundaries.insert(0);
   bool hasFullAnimation = false;
+  // Keys are gathered apart and admitted at the end: see below.
+  std::set<int> keyFrames;
 
   for (int c = 0; c < numCols; c++) {
     if (!isCountedCol(c)) continue;
@@ -4239,14 +4298,28 @@ void StoryboardPanel::detectAndUpdatePanels(int shotIdx) {
     TStageObject *obj = xsh->getStageObject(TStageObjectId::ColumnId(c));
     if (obj)
       for (int r = 1; r < numFrames; r++)
-        if (obj->isKeyframe(r)) boundaries.insert(r);
+        if (obj->isKeyframe(r)) keyFrames.insert(r);
   }
 
   if (useCameraKeys) {
     TStageObject *cam = xsh->getStageObject(TStageObjectId::CameraId(0));
     if (cam)
       for (int r = 1; r < numFrames; r++)
-        if (cam->isKeyframe(r)) boundaries.insert(r);
+        if (cam->isKeyframe(r)) keyFrames.insert(r);
+  }
+
+  // A key that only CLOSES something opens no panel: the last key before a
+  // cut (the next frame is itself a boundary) and a key on the shot's last
+  // frame. The merge writes exactly those — a key at the end of each joined
+  // segment, so the transforms do not interpolate across the join — and each
+  // one made a 1-frame panel: two shots of one drawing merged into five
+  // panels (Franco, 2026-09-28, sh220+sh230 of CS2605).
+  const int lastFrame =
+      timelineDuration + ZtoryShotOps::xdInHeadOffset(xsh) - 1;
+  for (int r : keyFrames) {
+    if (r >= lastFrame) continue;
+    if (keyFrames.count(r + 1) || boundaries.count(r + 1)) continue;
+    boundaries.insert(r);
   }
 
   if (hasFullAnimation) {
@@ -4567,7 +4640,14 @@ void StoryboardPanel::onModelResequenced() {
     qWarning("[ZTORY] onModelResequenced: scene has %d shot columns, panel has %d "
              "(or order differs) -> full rebuild",
              (int)childCols.size(), (int)m_shots.size());
+    // A shot operation on the main xsheet changes no sub-scene content: the
+    // panels that come back identical keep their preview instead of being
+    // rendered again — each render builds an offscreen GL context, and after
+    // a paste they took two seconds (measured with `sample`, 2026-09-28).
+    m_carryPreviews = true;
     refreshFromScene();
+    m_carryPreviews = false;
+    m_carriedPreviews.clear();
     // refreshFromScene() rebuilds the grid with blank thumbnails (lazy by
     // design, so scene LOAD never freezes). This branch only runs after an
     // interactive shot op (add / paste / delete / cut / merge), where the user
@@ -4665,6 +4745,7 @@ void StoryboardPanel::onMergeShots() {
   int dstDuration = dstR1 - dstR0 + 1;
   int lastFrameNum = dstDuration;
 
+  backupChildForUndo(dstCol, before);
   materializeCells(dstCl, dstDuration);
   trimChildXsheetTo(dstCl, dstDuration);
 
@@ -4961,6 +5042,7 @@ void StoryboardPanel::refreshFromScene() {
   // Note: production/title are NOT reset here. loadZtoryc() clears them only
   // when it finds an existing .ztoryc file, so that values set during scene
   // creation (startup popup) survive until the first saveZtoryc() anchors them.
+  if (m_carryPreviews) stashPreviewsForCarry();
   clearShots();
   TXsheet *xsh = scene->getChildStack()->getTopXsheet();
   if (!xsh) return;
@@ -4994,19 +5076,24 @@ void StoryboardPanel::refreshFromScene() {
     pd.duration = duration;
     shot.data.panels.push_back(pd);
     m_shots.push_back(shot);
-    addPanelWidget((int)m_shots.size()-1, 0);
+    // No widget here: loadZtoryc() builds them all from the loaded data, and
+    // the loop below covers the case where it returns before doing so. The
+    // widgets used to be built three times per refresh — placeholders here,
+    // again in loadZtoryc, again below — a third of a shot paste (measured
+    // with `sample`, 2026-09-28).
   }
+  m_widgetsBuiltByLoad = false;
   loadZtoryc();
-  // Rebuild panel widgets to match the panel data loaded from .ztoryc.
-  // refreshFromScene creates one placeholder widget per shot; loadZtoryc may
-  // have added more panels to shot.data.panels, so we recreate all widgets.
-  for (int si = 0; si < (int)m_shots.size(); si++) {
+  // loadZtoryc returned early (no .ztoryc, unreadable): build the widgets
+  // from the scene's data.
+  for (int si = 0; si < (int)m_shots.size() && !m_widgetsBuiltByLoad; si++) {
     for (PanelWidget *pw : m_shots[si].panels) {
       ztoryRetirePanelWidget(m_grid, pw);
     }
     m_shots[si].panels.clear();
     for (int pi = 0; pi < (int)m_shots[si].data.panels.size(); pi++) {
       addPanelWidget(si, pi);
+      restoreCarriedPreview(si, pi);
       // Restore text loaded by loadZtoryc() — addPanelWidget() creates a blank
       // widget so we must repopulate from data.panels which already has the text.
       m_shots[si].panels[pi]->setDuration(m_shots[si].data.panels[pi].duration);

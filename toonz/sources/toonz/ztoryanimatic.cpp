@@ -6949,6 +6949,44 @@ void materializeCells(TXshChildLevel *cl, int duration, bool fillToEnd = false) 
 
 // Helper: trim a child xsheet to |keepFrames| frames.
 // Removes cells >= keepFrames and removes stage-object keyframes >= keepFrames.
+// Keeps a pristine copy of the sub-scene at main column `col` for the undo of
+// an operation that changes it IN PLACE (merge). UndoBoardState's snapshot
+// holds only a POINTER to the level: undoing a merge put the main columns back
+// but left the first shot's sub-scene with the second shot's drawings and the
+// junction keys in it — hidden past its end, and the next merge showed them as
+// extra panels (Franco, 2026-09-28, sh220+sh230 of CS2605). Same technique as
+// the razor: cloneChild deep-copies the sub-scene, its column is orphaned
+// (the level pointer keeps it alive), and `before` is repointed at the copy.
+void backupChildForUndo(int col, ZtoryBoardSnap &before) {
+  // cloneChild works on the CURRENT xsheet: only when it is the main one.
+  TXsheet *mainXsh = TApp::instance()->getCurrentXsheet()->getXsheet();
+  ToonzScene *scene = TApp::instance()->getCurrentScene()->getScene();
+  if (!scene || mainXsh != scene->getChildStack()->getTopXsheet()) return;
+  TXshColumn *column = mainXsh ? mainXsh->getColumn(col) : nullptr;
+  if (!column) return;
+  int r0 = 0, r1 = 0;
+  column->getRange(r0, r1);
+  ColumnCmd::cloneChild(col);
+  TUndoManager::manager()->popUndo(1);  // covered by the caller's UndoBoardState
+  const int backupCol = col + 1;
+  TXshLevelP backupLevel;
+  for (int r = r0; r <= r1; r++) {
+    TXshCell cell = mainXsh->getCell(r, backupCol);
+    if (!cell.isEmpty() && cell.m_level && cell.m_level->getChildLevel()) {
+      backupLevel = cell.m_level;
+      break;
+    }
+  }
+  mainXsh->removeColumn(backupCol);
+  mainXsh->updateFrameCount();
+  if (backupLevel)
+    for (auto &s : before.shots)
+      if (s.data.xsheetColumn == col) {
+        s.level = backupLevel;
+        break;
+      }
+}
+
 void trimChildXsheetTo(TXshChildLevel *cl, int keepFrames) {
   if (!cl) return;
   TXsheet *xsh = cl->getXsheet();
@@ -7167,6 +7205,7 @@ void ZtoryAnimaticPanel::onMergeShots() {
   int dstDuration = dstR1 - dstR0 + 1;
   int lastFrameNum = dstDuration; // 1-based frame index for continuation
 
+  backupChildForUndo(dstCol, before);
   // Materialize held cells in the first shot before merging, then trim to the
   // timeline duration. Without the trim, any frames in the sub-scene beyond
   // dstDuration (hidden from the main xsheet) would overlap with the incoming
@@ -7354,6 +7393,7 @@ void ZtoryAnimaticPanel::onMergeWithNext(int col) {
   int dstDuration = dstR1 - dstR0 + 1;
   int srcDuration = srcR1 - srcR0 + 1;
 
+  backupChildForUndo(col, before);
   // Materialize held cells then trim to timeline duration — same reasoning as
   // onMergeShots: hidden frames beyond dstDuration must be removed before
   // appending src content, or they overlap with the incoming material.

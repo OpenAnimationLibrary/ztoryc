@@ -251,6 +251,13 @@ struct Shot {
   // re-save that would otherwise fire when loadZtoryc() publishes the
   // screenplay path it just read.
   bool m_loadingZtoryc = false;
+  bool m_widgetsBuiltByLoad = false;  // loadZtoryc built the panel widgets
+  // Previews handed from the widgets a shot operation retires to the ones that
+  // replace them, keyed by sub-scene + panel range (see carryPreviewKey).
+  bool m_carryPreviews = false;
+  QHash<QString, QPixmap> m_carriedPreviews;
+  void stashPreviewsForCarry();
+  void restoreCarriedPreview(int shotIdx, int panelIdx);
   // The .ztoryc path that corresponds to the current m_shots data.
   // Set at the end of refreshFromScene() (after loadZtoryc completes) and
   // cleared by clearShots(). saveZtoryc() uses this instead of ztoryPath() so
