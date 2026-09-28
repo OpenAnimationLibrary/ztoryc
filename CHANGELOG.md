@@ -1,3 +1,30 @@
+## [2026-09-28] — Board: clona/incolla da 6,6 s a 0,5 s, merge senza pannelli inventati, task per uuid
+
+Collaudato da Franco su CS2605 (Cascina). Commit `d8dbf7e83`, `58f649800`, `8f32bd3fc`.
+Review automatiche (ztoryc-reviewer, license-guard) rimandate alla prossima sessione per il limite
+settimanale: vedi reviews/2026-09-28_reviewer.md.
+
+### Fixed
+- **Clona/incolla lento** (6,6 s, misurato con `sample`): il tracker ricostruiva la tabella una volta
+  per shot; il Board costruiva i widget tre volte; le anteprime venivano tutte ridisegnate (ogni
+  render crea un contesto OpenGL); ogni operazione rifaceva l'intero Board. Ora il Board confronta
+  gli shot per identita' e tocca solo quelli cambiati: ~0,5 s.
+- **Merge di due shot con un disegno ciascuno → 5 pannelli**: le chiavi di giuntura scritte dal merge
+  aprivano pannelli da 1 fotogramma → 3 pannelli.
+- **L'undo del merge lasciava nella sotto-scena il disegno e le chiavi dello shot unito** (Board,
+  Animatic, Merge with Next): ora rimette una copia intatta, come il razor.
+- **Task che scivolavano sullo shot vicino** dopo cancella o merge: al salvataggio venivano ricopiati
+  per posizione, ora per uuid. Uno shot clonato poteva prendere l'uuid di un altro.
+- Dopo una chiusura non pulita le domande di recupero di scena e thumbs comparivano insieme.
+
+### Upstream candidates
+- Ogni anteprima/icona crea un contesto OpenGL fuori schermo (`ToonzScene::renderFrame` →
+  `TOfflineGL`): ~80% del render. Diagnosticato su Ztoryc.
+
+### Notes
+- Cresce ancora con la lunghezza: il secondo Board mai aperto rifa' tutto a ogni operazione
+  (~0,4 s su 69 shot). In ANIMATIC_TASKS.
+
 ## [2026-09-27b] — casting e anteprime su Kitsu, shot esportato autonomo, librerie del personaggio (bocche, pose, clip), crash dei listener
 
 Seconda parte del 27/09, collaudata da Franco su CS26 episodio CS2606 (Messina).

@@ -1529,6 +1529,24 @@ ricompare togliendo il segno; collegare un file toglie il segno.
 Voce di lavoro dalla review: il blocco <assets> dei .ztoryc vecchi (storyboardpanel ~3663) ricostruisce
 gli asset senza filePath/rigPsd/noFile — verificare che production.ztrack li rimetta dopo.
 
+### 🆕 2026-09-28 — Board: operazioni sugli shot piu' svelte, il resto (P2)
+
+Clona+incolla da ~6" a 2-3" (misurato con `sample`, collaudato da Franco): tracker ricostruito una
+volta sola, widget del Board costruiti una volta, anteprime riprese dai pannelli che non cambiano.
+Restano, sempre da `sample`:
+- ✅ **Aggiornare solo lo shot toccato** — FATTO il 28/09 (`8f32bd3fc`, `reconcileShotsWithScene`):
+  incolla ~0,5 s. Con lui i task seguono lo shot per uuid (prima un cancella/merge li faceva scivolare).
+- **Cio' che cresce ancora con la lunghezza dello storyboard**: un secondo Board mai aperto (room
+  Shot?) fa la ricostruzione completa a ogni operazione (~0,4 s su 69 shot, lineare); rimandarla a
+  quando si mostra richiede che l'Animatic non legga quel Board per gli snapshot dell'undo
+  (`findBoardPanel`). Poi `renumberAll` → `updateColumnName` su tutti gli shot, il salvataggio del
+  `.ztoryc` intero e la timeline dell'Animatic: lineari ma leggeri. Da rimisurare su uno storyboard
+  di 200+ shot.
+- **Ogni anteprima nuova crea un contesto OpenGL** (`ToonzScene::renderFrame` → `TOfflineGL` →
+  `initializeOpenGLFunctions`, ~80% del render): riusare il contesto. Codice stock → candidato upstream.
+- Merge di uno shot che e' una COPIA condivisa (stessa sotto-scena in piu' colonne): il merge cambia
+  tutte le copie, e l'undo ora rimette la copia intatta solo nella colonna di destinazione.
+
 ### 🆕 2026-09-27b — aperti dopo casting/anteprime, shot autonomo e librerie
 
 - **Le domande delle librerie si accodano** (review 27/09d, punto 8): ogni salvataggio crea un
