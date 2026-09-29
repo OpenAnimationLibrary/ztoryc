@@ -44,6 +44,10 @@
 #include "toonz/tstageobject.h"
 #include "toonz/tstageobjecttree.h"
 #include "toonz/levelproperties.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
 #include "toonz/imagemanager.h"
 #include "toonz/toonzimageutils.h"
 #include "toonz/tvectorimageutils.h"
@@ -1042,6 +1046,42 @@ void TLevelColumnFx::doCompute(TTile &tile, double frame,
 
   // To be sure, if there is no image, return.
   if (!img) return;
+
+  // Ztoryc diagnostics (ZTORYC_PLASTIC_DIAG=1): which image each level column
+  // actually got. On the Mac a character's sub-xsheet comes out different when
+  // rendered inside a sequence than alone; this tells which PSD layer changes
+  // and whether it carries another layer's pixels.
+  {
+    static const bool diagOn = (::getenv("ZTORYC_PLASTIC_DIAG") != nullptr);
+    if (diagOn) {
+      TRasterP dras;
+      if (TRasterImageP ri = img) dras = ri->getRaster();
+      else if (TToonzImageP ti = img) dras = ti->getCMapped();
+      unsigned long long h = 1469598103934665603ULL;
+      int lx = 0, ly = 0;
+      if (dras) {
+        lx = dras->getLx();
+        ly = dras->getLy();
+        dras->lock();
+        const int rowBytes = lx * dras->getPixelSize();
+        const int wrap     = dras->getWrap() * dras->getPixelSize();
+        const unsigned char *r = dras->getRawData();
+        for (int y = 0; y < ly; ++y, r += wrap)
+          for (int x = 0; x < rowBytes; ++x) {
+            h ^= r[x];
+            h *= 1099511628211ULL;
+          }
+        dras->unlock();
+      }
+      char hbuf[20];
+      snprintf(hbuf, sizeof hbuf, "%016llx", h);
+      std::cout << "LEVELRENDER frame=" << frame << " level='"
+                << ::to_string(sl->getName()) << "' fid=" << fid.expand()
+                << " path='" << ::to_string(sl->getPath().getWideString())
+                << "' img=" << lx << "x" << ly << " imgHash=" << hbuf
+                << std::endl;
+    }
+  }
 
   TRectD bBox = img->getBBox();
 

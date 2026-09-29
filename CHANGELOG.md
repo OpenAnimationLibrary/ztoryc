@@ -34,6 +34,11 @@ Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrova
 - **Diagnostica del render Plastic**: con `ZTORYC_PLASTIC_DIAG=1` ogni pezzo disegnato stampa una
   riga `PLASTICRENDER` con livello e fotogramma in ingresso, impronta dei pixel in ingresso e in
   uscita. Serve a dire se la bocca arriva al corpo gia' in ingresso o la mette OpenGL.
+  **Prima misura (sh110_test, Mac):** il fotogramma 1 renderizzato da solo esce giusto, dentro una
+  sequenza 1-60 sbagliato. In sequenza 4 personaggi su 6 in quadro ricevono un'immagine in ingresso
+  DIVERSA (stesse dimensioni, stessa posizione, `glErr=0`): la sottoscena del personaggio arriva
+  gia' sbagliata alla mesh. Non e' OpenGL. Aggiunta una riga `LEVELRENDER` per ogni livello caricato
+  (`TLevelColumnFx::doCompute`): livello, fotogramma, percorso, impronta dell'immagine.
 
 ### Added
 - **Cambiare legame chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.
