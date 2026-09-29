@@ -319,6 +319,13 @@ void tglDrawRigidity(const TMeshImage &image, double minColor[4],
 void tglDraw(const TMeshImage &meshImage, const DrawableTextureData &texData,
              const TAffine &meshToTexAff, const PlasticDeformerDataGroup &group,
              bool isMask) {
+  tglDraw(meshImage, *texData.m_textureData, meshToTexAff, group, isMask);
+}
+
+void tglDraw(const TMeshImage &meshImage,
+             const MeshTexturizer::TextureData &textureData,
+             const TAffine &meshToTexAff, const PlasticDeformerDataGroup &group,
+             bool isMask) {
   typedef MeshTexturizer::TextureData::TileData TileData;
 
   // Prepare OpenGL
@@ -338,7 +345,7 @@ void tglDraw(const TMeshImage &meshImage, const DrawableTextureData &texData,
   typedef std::vector<std::pair<int, int>> SortedFacesVector;
   const SortedFacesVector &sortedFaces = group.m_sortedFaces;
 
-  const MeshTexturizer::TextureData *td = texData.m_textureData;
+  const MeshTexturizer::TextureData *td = &textureData;
   int t, tCount = td->m_tileDatas.size();
 
   GLuint texId = -1;

@@ -348,9 +348,6 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     // Prepare texture
     TRaster32P tex(inTile.getRaster());
     TRop::depremultiply(tex);
-    static TAtomicVar var;
-    const std::string &texId = "render_tex " + std::to_string(++var);
-
     // Use the working context creation approach
     std::unique_ptr<QOpenGLContext> context(new QOpenGLContext());
     context->moveToThread(QThread::currentThread());
@@ -386,9 +383,17 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
       return;
     }
 
-    // Load texture
-    TTexturesStorage *ts                = TTexturesStorage::instance();
-    DrawableTextureDataP texData        = ts->loadTexture(texId, tex, bbox);
+    // Load texture — into a texturizer owned by THIS context, not through
+    // TTexturesStorage. The storage files textures by display-lists space,
+    // found from the current context; on macOS and Linux the context is known
+    // by its QOpenGLContext ADDRESS (tglGetCurrentContext), and a context
+    // created and deleted per part gets the same address again and again. A
+    // stale entry was then enough to put a texture in the wrong container:
+    // mouths drawn on bodies, on the Mac only (Windows keys on HGLRC).
+    std::unique_ptr<MeshTexturizer> texturizer(new MeshTexturizer);
+    const int texIdx = texturizer->bindTexture(tex, bbox);
+    const MeshTexturizer::TextureData *texData =
+        texturizer->getTextureData(texIdx);
     if (!texData) {
       TSysLog::error("PlasticDeformerFx: Failed to load texture data");
       fb.release();
@@ -466,9 +471,9 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     // Free the GL objects BEFORE giving the context up: glDeleteTextures and
     // the FBO's destructor act on the CURRENT context. Released after
     // doneCurrent() (as they were, at the end of the block) they deleted
-    // nothing. The texture is a temporary of the storage (no display-lists
-    // space for this context), so dropping the last reference unbinds it.
-    texData.reset();
+    // nothing.
+    texturizer->unbindTexture(texIdx);
+    texturizer.reset();
     fbo.reset();
     context->moveToThread(0);
     context->doneCurrent();

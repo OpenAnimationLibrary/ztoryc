@@ -23,6 +23,13 @@ Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrova
   distruggeva DOPO aver rilasciato il contesto: non venivano mai liberati, e a memoria video finita
   le texture nuove uscivano vuote. Ora niente condivisione, e si liberano col contesto ancora
   attivo (`plasticdeformerfx.cpp`). Da collaudare sul Mac.
+- **Render con Plastic sul Mac: bocche al posto dei corpi** (la stessa scena esce giusta su
+  Windows, anche con un solo personaggio acceso). Le texture del render passavano da
+  `TTexturesStorage`, che le archivia per contesto OpenGL; su macOS il contesto e' riconosciuto
+  dall'INDIRIZZO del `QOpenGLContext` (`tglGetCurrentContext`, su Windows dall'HGLRC), e un
+  contesto creato e distrutto per ogni parte riprende sempre lo stesso indirizzo. Ora ogni parte
+  usa un `MeshTexturizer` suo, dentro il suo contesto (`tglDraw` accetta i dati del texturizer).
+  Ipotesi dal codice, da collaudare sul Mac.
 
 ### Added
 - **Cambiare legame chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.

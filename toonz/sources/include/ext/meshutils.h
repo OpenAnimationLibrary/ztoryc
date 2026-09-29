@@ -3,6 +3,9 @@
 #ifndef MESHUTILS_H
 #define MESHUTILS_H
 
+// MeshTexturizer::TextureData is nested: it cannot be forward-declared.
+#include "ext/meshtexturizer.h"
+
 #undef DVAPI
 #undef DVVAR
 #ifdef TNZEXT_EXPORTS
@@ -128,5 +131,12 @@ DVAPI void tglDraw(
         &deformerDatas,  //!< Data structure of a deformation of the input image.
     bool isMask
     );
+
+//! Same as above, straight from a texturizer's data: for a caller that owns
+//! its MeshTexturizer instead of going through TTexturesStorage.
+DVAPI void tglDraw(const TMeshImage &image,
+                   const MeshTexturizer::TextureData &textureData,
+                   const TAffine &meshToTexAffine,
+                   const PlasticDeformerDataGroup &deformerDatas, bool isMask);
 
 #endif  // MESHUTILS_H
