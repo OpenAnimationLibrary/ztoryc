@@ -131,6 +131,12 @@ degli status).
 - **Assistenti al disegno da OpenToonz** (2026-08-13): candidato misurato e
   registrato in `OPENTOONZ_PORT_CANDIDATES.md`, ma Franco ha scelto di passare
   prima al rig. Non e' il prossimo lavoro.
+- 🆕 **OpenPose ↔ scheletro Plastic** (2026-09-29, design, nessun codice):
+  export della posa verso ControlNet e import di animazioni estratte da video,
+  una tabella di corrispondenza per personaggio in comune. Prima prova su un
+  personaggio dalle proporzioni umane. Vedi `DESIGN_openpose.md`; § 8 dice cosa
+  procurare prima di cominciare (un JSON vero da DWPose, il personaggio, un
+  video di prova).
 - ✅ **Render sbagliato sh110 — CAUSA TROVATA E CORRETTA** (2026-09-29, collaudato
   da Franco sul Mac). Non era OpenGL ne' il Plastic: `TLevelColumnFx::getAlias`
   usava `path.withFrame(fid)`, che con la regola dei nomi Standard riduce
