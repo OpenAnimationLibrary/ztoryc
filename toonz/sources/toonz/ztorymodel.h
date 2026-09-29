@@ -230,6 +230,9 @@ struct Asset {
   QString                  type;   // "Character" / "Prop" / "FX" / "Environment" (Kitsu-aligned)
   QString                  name;
   QString kitsuAssetId;  // Kitsu asset (entity) id once synced — link across renames
+  // On a series: Kitsu keeps this asset in the Main Pack, shared by every
+  // episode (no episode of its own). Set by the Sync; shown as «MP».
+  bool kitsuMainPack = false;
   QMap<QString, TaskState> tasks;  // keyed by asset task-type name
   QStringList              tags;   // free categorisation (future: breakdown / AI)
   // Il file di questo asset, per l'export che lo importa nello shot.

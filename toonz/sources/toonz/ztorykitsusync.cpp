@@ -410,6 +410,10 @@ int importAssets(const QVector<KitsuAsset> &assets) {
         found->kitsuAssetId = ka.kitsuAssetId;
         dirty               = true;
       }
+      if (found->kitsuMainPack != ka.mainPack) {
+        found->kitsuMainPack = ka.mainPack;
+        dirty                = true;
+      }
       continue;
     }
     // A Kitsu asset type this project has no pipeline for (the instance also
@@ -422,8 +426,9 @@ int importAssets(const QVector<KitsuAsset> &assets) {
       ++newTypes;
     }
     mm->addAsset(ka.type, ka.name.trimmed());
-    mm->assets().back().kitsuAssetId = ka.kitsuAssetId;
-    dirty                            = true;
+    mm->assets().back().kitsuAssetId  = ka.kitsuAssetId;
+    mm->assets().back().kitsuMainPack = ka.mainPack;
+    dirty                             = true;
   }
   if (dirty) {
     mm->saveProjectDb();
@@ -543,6 +548,45 @@ ZtoryKitsuSync::ZtoryKitsuSync(QObject *parent) : QObject(parent) {
                     "the type in Kitsu (or change the asset's type here) and "
                     "sync again.")
                      .arg(lines.join("\n")));
+          });
+
+  connect(kc, &KitsuClient::assetsInOtherEpisodes, this,
+          [this](const QStringList &ids) {
+            if (m_step == 3) m_otherEpisodeIds = ids;
+          });
+
+  // Assets LINKED to Kitsu that Kitsu now puts in ANOTHER episode leave this
+  // tracker, without asking (Franco, 2026-09-29): an asset belongs to its
+  // episode or to the Main Pack, nowhere else. Before, the Sync only added,
+  // and one imported while in reach (VIDEOGIOCO_ALIENO, Cascina's, in
+  // Messina) stayed after being moved on Kitsu. Nothing is deleted on Kitsu,
+  // and assets not linked to Kitsu are never touched.
+  connect(kc, &KitsuClient::assetsInOtherEpisodes, this,
+          [this](const QStringList &ids) {
+            if (m_step != 3 || ids.isEmpty()) return;
+            ZtoryModel *m = ZtoryModel::instance();
+            auto &assets  = m->assets();
+            QStringList gone;
+            for (int i = int(assets.size()) - 1; i >= 0; --i)
+              if (!assets[i].kitsuAssetId.isEmpty() &&
+                  ids.contains(assets[i].kitsuAssetId)) {
+                gone.prepend(assets[i].name);
+                m->removeAssetAt(i);
+              }
+            if (gone.isEmpty()) return;
+            m_droppedAssets += gone.size();
+            m->saveProjectDb();
+            warn(tr("Taken out of this tracker — on Kitsu they belong to "
+                    "another episode:\n\n%1")
+                     .arg(gone.join("\n")));
+          });
+
+  connect(kc, &KitsuClient::assetsLeftInMainPack, this,
+          [this](const QStringList &names) {
+            warn(tr("These assets were created on Kitsu but are in the Main "
+                    "Pack, shared by every episode — the episode could not be "
+                    "set:\n\n%1\n\nMove them to the episode in Kitsu.")
+                     .arg(names.join("\n")));
           });
 
   connect(kc, &KitsuClient::assetTasksUnlinked, this, [this](int count) {
@@ -798,6 +842,7 @@ bool ZtoryKitsuSync::start(int handles, QString *why) {
   }
   m_handles = handles;
   m_updated = m_conflicts = m_notSent = 0;
+  m_droppedAssets = 0;
   m_castTaken = m_castWritten = m_castConflicts = 0;
   m_castBases.clear();
   m_castScope.clear();
@@ -815,6 +860,36 @@ void ZtoryKitsuSync::warn(const QString &text) {
     m_warnings << text;
   else
     DVGui::MsgBoxInPopup(DVGui::WARNING, text);
+}
+
+// The Sync only adds: an asset imported while it was in reach (the Main
+// Pack, or this episode) stayed in the tracker after being moved to another
+// episode on Kitsu (Franco, 2026-09-29: VIDEOGIOCO_ALIENO, Cascina's, in
+// Messina). Asked at the END, with the Sync over: a modal box in the middle
+// would let the two-minute watchdog stop it. Only assets LINKED to Kitsu and
+// placed by Kitsu in another episode are offered; nothing else is touched.
+void ZtoryKitsuSync::offerToDropOtherEpisodes() {
+  const QStringList ids = m_otherEpisodeIds;
+  m_otherEpisodeIds.clear();
+  if (ids.isEmpty()) return;
+  ZtoryModel *m = ZtoryModel::instance();
+  QStringList names;
+  for (const Asset &a : m->assets())
+    if (!a.kitsuAssetId.isEmpty() && ids.contains(a.kitsuAssetId))
+      names << QString("%1 (%2)").arg(a.name, a.type);
+  if (names.isEmpty()) return;
+  const int answer = DVGui::MsgBox(
+      tr("On Kitsu these assets now belong to ANOTHER episode, not to %1:\n\n"
+         "%2\n\nTake them out of this tracker? (Nothing is deleted on Kitsu.)")
+          .arg(m->episode(), names.join("\n")),
+      tr("Take them out"), tr("Keep them"), 1);
+  if (answer != 1) return;
+  auto &assets = m->assets();
+  for (int i = int(assets.size()) - 1; i >= 0; --i)
+    if (!assets[i].kitsuAssetId.isEmpty() &&
+        ids.contains(assets[i].kitsuAssetId))
+      m->removeAssetAt(i);
+  m->saveProjectDb();
 }
 
 // Shown once at the end, not as popups that stop the Sync halfway.
@@ -896,6 +971,8 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
     if (m_castConflicts)
       text += tr("; %1 breakdown link(s) changed on both sides, Kitsu's kept")
                   .arg(m_castConflicts);
+    if (m_droppedAssets)
+      text += tr("; %1 asset(s) of other episodes taken out").arg(m_droppedAssets);
     if (m_previewsSent || m_previewsFailed)
       text += tr("; %1 asset preview(s) uploaded").arg(m_previewsSent);
     if (m_previewsFailed)
@@ -909,6 +986,7 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
                       m_previewsFailed,
                   text + ".");
     showWarnings();
+    offerToDropOtherEpisodes();
     return;
   }
   }

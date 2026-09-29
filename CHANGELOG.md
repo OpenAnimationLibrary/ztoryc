@@ -71,7 +71,20 @@ compilate (syntax check Qt 5 su Linux e build del worktree di prova), **da colla
   «New asset» di Cascina rinominato: collegato a un asset di Cascina, non creato. Da decidere se il
   Sync debba propagare i nomi.
 
+- **Il Sync toglie dal tracker gli asset che Kitsu mette in un altro episodio** (Franco: «se non
+  sono dell'episodio o del main pack vanno tolti e basta»). Prima il Sync aggiungeva soltanto:
+  VIDEOGIOCO_ALIENO, importato quando era raggiungibile, restava in Messina anche dopo essere stato
+  spostato in Cascina su Kitsu. Solo asset COLLEGATI a Kitsu, niente cancellato su Kitsu; l'elenco
+  di cio' che e' uscito compare fra gli avvisi di fine Sync e nel riepilogo.
+- **Asset creati nel Main Pack nonostante `episode_id`** («manette»): il Kitsu di Franco ignora il
+  campo alla creazione. Ora, se l'asset creato non e' nell'episodio, Ztoryc lo sposta subito
+  (`PUT /data/entities/<id>` con `source_id`, come `update_asset` di gazu); se anche questo fallisce,
+  un avviso dice quali asset sono rimasti nel Main Pack.
+
 ### Added
+- **«MP» sugli asset del Main Pack**: nella tabella Assets la colonna Type dice «Prop · MP», in
+  azzurro, per gli asset che Kitsu tiene nel Main Pack (condivisi da tutta la serie); il Sync lo
+  aggiorna a ogni pull e lo salva nel `.ztrack` (`mainPack="1"`).
 - **Diagnostica del render** con `ZTORYC_PLASTIC_DIAG=1`: una riga `LEVELRENDER` per ogni
   immagine di livello caricata (livello, fotogramma, percorso, impronta) e una `PLASTICRENDER` per
   ogni pezzo Plastic disegnato (impronta in ingresso, dove cade la mesh, errori GL, pixel

@@ -127,6 +127,7 @@ struct KitsuAsset {
   QString type;
   QString name;
   QString kitsuAssetId;  // non-empty → it already exists in Kitsu
+  bool    mainPack = false;  // pulled for an episode, but in the Main Pack
 };
 
 // A Kitsu person (team member). name is the display name (full_name); id is the
@@ -478,6 +479,13 @@ signals:
   // one "Type: name, name…" line per missing type. Emitted just before
   // assetsPushed, only when something was skipped.
   void assetsSkipped(const QStringList &linesByMissingType);
+  // Created on Kitsu but still in the Main Pack: the episode could not be set.
+  void assetsLeftInMainPack(const QStringList &names);
+  // Emitted just before assetsPulled, on a series bound to an episode: the
+  // Kitsu ids of the assets that now belong to ANOTHER episode. The pull
+  // leaves them out; the Sync uses this to offer to take them out of the
+  // tracker too (it only ever adds otherwise).
+  void assetsInOtherEpisodes(const QStringList &kitsuAssetIds);
   void assetsPulled(bool ok, const QVector<KitsuAsset> &assets,
                     const QString &message);
   void assetStatusesPulled(bool ok,
@@ -624,6 +632,7 @@ private:
   int m_asCreated = 0;
   int m_asUpdated = 0;
   QMap<QString, QStringList> m_asSkipped;    // missing type -> asset names
+  QStringList m_asNotMoved;  // created, but left in the Main Pack
 
   // Asset-task push pipeline (mirror of the shot task pipeline for assets).
   void atLoadTaskTypes();    // GET /api/data/task-types (for_entity = Asset)

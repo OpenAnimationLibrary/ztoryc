@@ -1299,6 +1299,7 @@ void KitsuClient::pushAssets(const QString &projectId,
   m_asResolved.clear();
   m_asIndex = m_asCreated = m_asUpdated = 0;
   m_asSkipped.clear();
+  m_asNotMoved.clear();
   asPushLoadTypes();
 }
 
@@ -1386,15 +1387,38 @@ void KitsuClient::asPushProcessNext() {
       r->deleteLater();
       const QByteArray b = r->readAll();
       if (r->error() != QNetworkReply::NoError) { asPushFail(errorMessage(r, b)); return; }
-      const QString id = QJsonDocument::fromJson(b).object().value("id").toString();
+      const QJsonObject created = QJsonDocument::fromJson(b).object();
+      const QString id          = created.value("id").toString();
       if (!id.isEmpty()) m_asResolved.insert(key, id);
       ++m_asCreated;
       ++m_asIndex;
+      // Some Zou versions ignore episode_id on creation and leave the asset
+      // in the Main Pack (Franco, 2026-09-29: «manette»). Then it is moved
+      // with an update of source_id — the way gazu's update_asset does it —
+      // before going on. A failed move is not fatal: the asset exists, it is
+      // only shared; said in the Sync's warnings.
+      if (!id.isEmpty() && !m_asEpisodeId.isEmpty() &&
+          created.value("source_id").toString() != m_asEpisodeId) {
+        QJsonObject upd;
+        upd["source_id"] = m_asEpisodeId;
+        QNetworkReply *ur =
+            authPut("/api/data/entities/" + id,
+                    QJsonDocument(upd).toJson(QJsonDocument::Compact));
+        connect(ur, &QNetworkReply::finished, this, [this, ur, key]() {
+          ur->deleteLater();
+          const QByteArray ub = ur->readAll();
+          if (ur->error() != QNetworkReply::NoError)
+            m_asNotMoved << key.section('\n', 1);
+          asPushProcessNext();
+        });
+        return;
+      }
       asPushProcessNext();
     });
     return;  // resume in the callback
   }
   emit assetIdsResolved(m_asResolved);
+  if (!m_asNotMoved.isEmpty()) emit assetsLeftInMainPack(m_asNotMoved);
   int skipped = 0;
   if (!m_asSkipped.isEmpty()) {
     QStringList lines;
@@ -1844,15 +1868,22 @@ void KitsuClient::asPullLoadAssets() {
     const QByteArray b = r->readAll();
     if (r->error() != QNetworkReply::NoError) { asPullFail(errorMessage(r, b)); return; }
     QVector<KitsuAsset> out;
+    QStringList elsewhere;  // in another episode of this series
     for (const QJsonValue &v : QJsonDocument::fromJson(b).array()) {
       const QJsonObject o = v.toObject();
-      if (!episodeScoped(o)) continue;
+      if (!episodeScoped(o)) {
+        elsewhere << o.value("id").toString();
+        continue;
+      }
       KitsuAsset a;
       a.kitsuAssetId = o.value("id").toString();
       a.name         = o.value("name").toString();
       a.type = m_asTypeNameById.value(o.value("entity_type_id").toString());
+      a.mainPack = !m_entityEpisodeId.isEmpty() &&
+                   o.value("source_id").toString().isEmpty();
       if (!a.name.isEmpty()) out.push_back(a);
     }
+    if (!m_entityEpisodeId.isEmpty()) emit assetsInOtherEpisodes(elsewhere);
     emit assetsPulled(true, out,
                       tr("Pulled %1 assets from Kitsu.").arg(out.size()));
   });

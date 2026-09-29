@@ -2341,9 +2341,17 @@ void ZtoryProductionPanel::rebuildAssets() {
   QHash<QString, QFileInfoList> dirCache;  // each category folder listed once
   for (int i = 0; i < m->assetCount(); i++) {
     const Asset &as = m->assets()[i];
-    auto *typeItem  = new QTableWidgetItem(as.type);
+    // «MP»: Kitsu keeps it in the Main Pack, shared by every episode of the
+    // series — told apart from this episode's own assets (Franco, 2026-09-29).
+    auto *typeItem = new QTableWidgetItem(
+        as.kitsuMainPack ? QString("%1 · MP").arg(as.type) : as.type);
     typeItem->setFlags(Qt::ItemIsEnabled);  // edited via click menu
     typeItem->setTextAlignment(Qt::AlignCenter);
+    if (as.kitsuMainPack) {
+      typeItem->setForeground(QColor(0x5A, 0xB4, 0xFF));
+      typeItem->setToolTip(QObject::tr(
+          "Main Pack on Kitsu: shared by every episode of the series."));
+    }
     m_assetTable->setItem(i, 0, typeItem);
     auto *nameItem = new QTableWidgetItem(as.name);
     nameItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsEditable);

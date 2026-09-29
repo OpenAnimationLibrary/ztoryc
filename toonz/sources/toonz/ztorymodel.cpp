@@ -1414,6 +1414,7 @@ void ZtoryModel::saveProjectDb() {
     xml.writeAttribute("name", as.name);
     if (!as.kitsuAssetId.isEmpty())
       xml.writeAttribute("kitsuAssetId", as.kitsuAssetId);
+    if (as.kitsuMainPack) xml.writeAttribute("mainPack", "1");
     if (!as.tags.isEmpty()) xml.writeAttribute("tags", as.tags.join("|"));
     if (!as.filePath.isEmpty()) xml.writeAttribute("file", as.filePath);
     if (!as.rigPsdPath.isEmpty()) xml.writeAttribute("rigPsd", as.rigPsdPath);
@@ -1593,6 +1594,7 @@ void ZtoryModel::loadProjectDbFromDevice(QIODevice &file) {
       if (as.type == QLatin1String("BG")) as.type = "Environment";
       as.name  = a.value("name").toString();
       as.kitsuAssetId = a.value("kitsuAssetId").toString();
+      as.kitsuMainPack = (a.value("mainPack") == QLatin1String("1"));
       as.filePath     = a.value("file").toString();
       as.rigPsdPath   = a.value("rigPsd").toString();
       as.noFile       = a.value("noFile") == QLatin1String("1");
