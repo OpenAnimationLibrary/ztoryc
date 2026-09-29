@@ -52,7 +52,8 @@ Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrova
   compilata a parte, rende `…/SOFIA/ch.1.psd` per ogni strato. Ora l'alias e' il percorso intero
   piu' `|frame=<fid>`: nessuna interpretazione. Spiega anche il «prima rendeva, poi no» di agosto
   solo se nel frattempo e' cambiata la regola dei nomi del progetto o il modo di importare i PSD:
-  da verificare. Da collaudare sul Mac.
+  da verificare. **Collaudato da Franco sul Mac** (sh110_test, render corretto). Resta da capire
+  perche' Windows rendeva bene la stessa scena dallo stesso progetto su Drive.
 
 ### Added
 - **Cambiare legame chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.

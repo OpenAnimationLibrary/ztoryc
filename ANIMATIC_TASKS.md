@@ -131,10 +131,18 @@ degli status).
 - **Assistenti al disegno da OpenToonz** (2026-08-13): candidato misurato e
   registrato in `OPENTOONZ_PORT_CANDIDATES.md`, ma Franco ha scelto di passare
   prima al rig. Non e' il prossimo lavoro.
-- **Render sbagliato sh110**: sospeso dal 2026-08-07. ⚠️ **Novita' del
-  2026-08-14**: ora e' **riproducibile a comando** (tcomposer headless, frame
-  110, MD5 stabile) — ma resta sospeso finche' Franco non lo riapre. Vedi la
-  voce dedicata piu' sotto.
+- ✅ **Render sbagliato sh110 — CAUSA TROVATA E CORRETTA** (2026-09-29, collaudato
+  da Franco sul Mac). Non era OpenGL ne' il Plastic: `TLevelColumnFx::getAlias`
+  usava `path.withFrame(fid)`, che con la regola dei nomi Standard riduce
+  `ch_sofia#corpo#group.psd` a `ch.1.psd` → tutti gli strati PSD di un
+  personaggio con lo stesso alias → la cache delle immagini del render
+  (`LevelFxBuilder`) li scambiava, solo in sequenza. Branch
+  `claude/dreamy-ride-rvt04i`, `d2bc410c`. Misurato con le righe
+  `LEVELRENDER`/`PLASTICRENDER` (`ZTORYC_PLASTIC_DIAG=1`), metodo: stesso
+  fotogramma da solo (buono) e dentro una sequenza (cattivo).
+  **Aperto:** perche' Windows (0.10 e 0.15) rendeva bene la stessa scena, dallo
+  stesso progetto su Drive. Due modifiche OpenGL fatte lungo la strada
+  (`08eb52e`, `9ed0ed4f`) non c'entravano: decidere se tenerle.
 
 - 🐞 **DUE DIFETTI ZtoRig segnalati usandolo** (Franco, 2026-08-16, mentre
   costruiva il primo personaggio). Non affrontati subito per sua indicazione
