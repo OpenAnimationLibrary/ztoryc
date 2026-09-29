@@ -1631,7 +1631,6 @@ std::string TLevelColumnFx::getAlias(double frame,
   TXshCell cell = m_levelColumn->getCell((int)frame);
   if (cell.isEmpty()) return std::string();
 
-  TFilePath fp;
   TXshSimpleLevel *sl = cell.getSimpleLevel();
 
   if (!sl) {
@@ -1642,11 +1641,18 @@ std::string TLevelColumnFx::getAlias(double frame,
     return std::string();
   }
 
-  TFilePath path = sl->getPath();
+  // The WHOLE path as written, plus the frame id spelled out. It used to be
+  // path.withFrame(fid), which re-parses the file name as a sequence: under
+  // the Standard file-path rule "ch_sofia#corpo#group.psd" became
+  // "ch.1.psd" (everything after the first '_' taken for the frame), so all
+  // the PSD layers of one character shared ONE alias. The render then served
+  // one layer's cached image for another — a mouth where the body should be,
+  // or nothing — only in sequence renders, where the cache is reused
+  // (Franco, sh110, 2026-09-29; measured with LEVELRENDER). An alias only has
+  // to be unique and stable; it never needs to be a valid path.
+  std::wstring fpStr = sl->getPath().getWideString();
   if (!cell.m_frameId.isNoFrame())
-    fp = path.withFrame(cell.m_frameId);
-  else
-    fp = path;
+    fpStr += L"|frame=" + ::to_wstring(cell.m_frameId.expand());
 
   std::string rdata;
   std::vector<TRasterFxRenderDataP>::const_iterator it = info.m_data.begin();
@@ -1683,8 +1689,7 @@ std::string TLevelColumnFx::getAlias(double frame,
     rdata += maskAlias;
   }
 
-   return getFxType() + "[" + ::to_string(fp.getWideString()) + "," + rdata +
-         "]";
+  return getFxType() + "[" + ::to_string(fpStr) + "," + rdata + "]";
 }
 
 //-------------------------------------------------------------------

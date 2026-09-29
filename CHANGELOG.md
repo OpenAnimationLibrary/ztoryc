@@ -40,6 +40,20 @@ Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrova
   gia' sbagliata alla mesh. Non e' OpenGL. Aggiunta una riga `LEVELRENDER` per ogni livello caricato
   (`TLevelColumnFx::doCompute`): livello, fotogramma, percorso, impronta dell'immagine.
 
+- **CAUSA TROVATA del render sbagliato con i personaggi da PSD (sh110 e seguenti)** — `tcolumnfx.cpp`,
+  `TLevelColumnFx::getAlias`. L'alias di ogni livello era `path.withFrame(fid)`, che RI-INTERPRETA il
+  nome del file come sequenza: con la regola Standard `ch_sofia#corpo#group.psd` al fotogramma 1
+  diventa `ch.1.psd` (tutto quello che segue il primo `_` preso per il fotogramma). Tutti gli strati
+  PSD di un personaggio avevano quindi LO STESSO alias, e il render, che mette in cache le immagini
+  per alias (`LevelFxBuilder`, `alias + "_image"`), in sequenza serviva a uno strato l'immagine di
+  un altro (la bocca al posto del corpo) o nessuna (la parte sparisce). Da solo il fotogramma usciva
+  giusto perche' la cache non viene riusata. Misurato: in sequenza, fotogramma 1, Sofia carica 2
+  strati su 13, Rompolo perde `CORPO`, Eolo `corpoeolo`, Cucciolo `corpo`; la funzione vera,
+  compilata a parte, rende `…/SOFIA/ch.1.psd` per ogni strato. Ora l'alias e' il percorso intero
+  piu' `|frame=<fid>`: nessuna interpretazione. Spiega anche il «prima rendeva, poi no» di agosto
+  solo se nel frattempo e' cambiata la regola dei nomi del progetto o il modo di importare i PSD:
+  da verificare. Da collaudare sul Mac.
+
 ### Added
 - **Cambiare legame chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.
 - **Riconnessione all'apertura** del tracker, con le credenziali salvate, dopo una domanda che
