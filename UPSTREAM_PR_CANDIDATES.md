@@ -440,6 +440,25 @@ not portable.
   build to confirm no level-naming regression — the underscore frame format is
   the part to exercise.)*
 
+#### ✨ New (2026-09-29)
+
+- ❓ **Level aliases collide for PSD layers → a sequence render swaps or drops
+  layers** — `toonzlib/tcolumnfx.cpp`, `TLevelColumnFx::getAlias()`. The alias
+  was built with `path.withFrame(fid)`, which re-parses the file name as an
+  image sequence. Under the **Standard** file-path rule a PSD layer path such
+  as `ch_sofia#corpo#group.psd` becomes `ch.1.psd` at frame 1 — everything
+  after the first `_` is taken as the frame part — so **every layer of that
+  PSD gets the same alias**. The raster loader caches images by alias
+  (`LevelFxBuilder`, `alias + "_image"`), so in a sequence render one layer
+  receives another layer's cached image (a mouth drawn where the body should
+  be) or none (the part disappears); the same frame rendered alone is
+  correct. Measured with per-layer image hashes: at frame 1 of a 60-frame
+  render one character loaded 2 layers out of 13. **Fix:** the full path
+  string plus the frame id spelled out (`|frame=<fid>`), no parsing — an
+  alias only has to be unique and stable. Verified in Ztoryc on macOS; the
+  upstream function is the same code. To reproduce on stock: a PSD whose file
+  name contains `_`, imported in group mode, rendered as a range.
+
 ### 2.2 — Features that can go upstream as they are
 
 - 🟡 **Alt (⌥) + middle-drag = the Rotate tool, held** — `toonz/sceneviewerevents.cpp`
