@@ -17,6 +17,13 @@ Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrova
   primo Sync creava l'episodio ma non ne salvava l'id, e ogni pull leggeva tutti gli episodi.
   Ora lo lega (`episodeResolved`). Una serie senza episodio ne' nome non si sincronizza piu'.
 
+- **Render con Plastic: parti che sparivano dopo qualche decina di fotogrammi** (8 personaggi da
+  PSD in sottoscene; task in JPEG buono fino al fotogramma 40, MP4 dal programma rotto da subito).
+  Ogni parte creava texture e framebuffer in un contesto OpenGL condiviso con il viewer, e li
+  distruggeva DOPO aver rilasciato il contesto: non venivano mai liberati, e a memoria video finita
+  le texture nuove uscivano vuote. Ora niente condivisione, e si liberano col contesto ancora
+  attivo (`plasticdeformerfx.cpp`). Da collaudare sul Mac.
+
 ### Added
 - **Cambiare legame chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.
 - **Riconnessione all'apertura** del tracker, con le credenziali salvate, dopo una domanda che

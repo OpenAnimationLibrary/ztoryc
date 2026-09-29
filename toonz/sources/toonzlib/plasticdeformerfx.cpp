@@ -355,10 +355,11 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     std::unique_ptr<QOpenGLContext> context(new QOpenGLContext());
     context->moveToThread(QThread::currentThread());
 
-    // Share context with current if available
-    if (QOpenGLContext::currentContext())
-      context->setShareContext(QOpenGLContext::currentContext());
-
+    // NOT shared with the context already current (the viewer's, in the app):
+    // the texture and the FBO are created and used here only, and in a shared
+    // group they outlived this context — one PSD layer's texture leaked per
+    // part and per frame until VRAM ran out and parts rendered empty (Franco,
+    // 2026-09-29: a task render good for 40 frames, then broken).
     context->setFormat(QSurfaceFormat::defaultFormat());
 
     if (!context->create()) {
@@ -374,7 +375,10 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     }
 
     TDimension d = tile.getRaster()->getSize();
-    QOpenGLFramebufferObject fb(d.lx, d.ly);
+    // Owned here so it can be destroyed while the context is still current.
+    std::unique_ptr<QOpenGLFramebufferObject> fbo(
+        new QOpenGLFramebufferObject(d.lx, d.ly));
+    QOpenGLFramebufferObject &fb = *fbo;
 
     if (!fb.bind()) {
       TSysLog::error("PlasticDeformerFx: Failed to bind FBO");
@@ -384,7 +388,7 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
 
     // Load texture
     TTexturesStorage *ts                = TTexturesStorage::instance();
-    const DrawableTextureDataP &texData = ts->loadTexture(texId, tex, bbox);
+    DrawableTextureDataP texData        = ts->loadTexture(texId, tex, bbox);
     if (!texData) {
       TSysLog::error("PlasticDeformerFx: Failed to load texture data");
       fb.release();
@@ -459,8 +463,13 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     glFinish();
 
 
-    // Unload texture to prevent memory leaks
-    // ts->unloadTexture(texId); // Auto-released ttexturesstorage??
+    // Free the GL objects BEFORE giving the context up: glDeleteTextures and
+    // the FBO's destructor act on the CURRENT context. Released after
+    // doneCurrent() (as they were, at the end of the block) they deleted
+    // nothing. The texture is a temporary of the storage (no display-lists
+    // space for this context), so dropping the last reference unbinds it.
+    texData.reset();
+    fbo.reset();
     context->moveToThread(0);
     context->doneCurrent();
 
