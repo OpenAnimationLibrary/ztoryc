@@ -550,11 +550,6 @@ ZtoryKitsuSync::ZtoryKitsuSync(QObject *parent) : QObject(parent) {
                      .arg(lines.join("\n")));
           });
 
-  connect(kc, &KitsuClient::assetsInOtherEpisodes, this,
-          [this](const QStringList &ids) {
-            if (m_step == 3) m_otherEpisodeIds = ids;
-          });
-
   // Assets LINKED to Kitsu that Kitsu now puts in ANOTHER episode leave this
   // tracker, without asking (Franco, 2026-09-29): an asset belongs to its
   // episode or to the Main Pack, nowhere else. Before, the Sync only added,
@@ -862,36 +857,6 @@ void ZtoryKitsuSync::warn(const QString &text) {
     DVGui::MsgBoxInPopup(DVGui::WARNING, text);
 }
 
-// The Sync only adds: an asset imported while it was in reach (the Main
-// Pack, or this episode) stayed in the tracker after being moved to another
-// episode on Kitsu (Franco, 2026-09-29: VIDEOGIOCO_ALIENO, Cascina's, in
-// Messina). Asked at the END, with the Sync over: a modal box in the middle
-// would let the two-minute watchdog stop it. Only assets LINKED to Kitsu and
-// placed by Kitsu in another episode are offered; nothing else is touched.
-void ZtoryKitsuSync::offerToDropOtherEpisodes() {
-  const QStringList ids = m_otherEpisodeIds;
-  m_otherEpisodeIds.clear();
-  if (ids.isEmpty()) return;
-  ZtoryModel *m = ZtoryModel::instance();
-  QStringList names;
-  for (const Asset &a : m->assets())
-    if (!a.kitsuAssetId.isEmpty() && ids.contains(a.kitsuAssetId))
-      names << QString("%1 (%2)").arg(a.name, a.type);
-  if (names.isEmpty()) return;
-  const int answer = DVGui::MsgBox(
-      tr("On Kitsu these assets now belong to ANOTHER episode, not to %1:\n\n"
-         "%2\n\nTake them out of this tracker? (Nothing is deleted on Kitsu.)")
-          .arg(m->episode(), names.join("\n")),
-      tr("Take them out"), tr("Keep them"), 1);
-  if (answer != 1) return;
-  auto &assets = m->assets();
-  for (int i = int(assets.size()) - 1; i >= 0; --i)
-    if (!assets[i].kitsuAssetId.isEmpty() &&
-        ids.contains(assets[i].kitsuAssetId))
-      m->removeAssetAt(i);
-  m->saveProjectDb();
-}
-
 // Shown once at the end, not as popups that stop the Sync halfway.
 void ZtoryKitsuSync::showWarnings() {
   if (m_warnings.isEmpty()) return;
@@ -986,7 +951,6 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
                       m_previewsFailed,
                   text + ".");
     showWarnings();
-    offerToDropOtherEpisodes();
     return;
   }
   }

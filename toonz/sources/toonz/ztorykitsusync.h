@@ -71,9 +71,6 @@ private:
   explicit ZtoryKitsuSync(QObject *parent = nullptr);
   void advance(bool ok, const QString &msg);
   void showWarnings();
-  // End of a Sync: assets of this tracker that Kitsu now puts in ANOTHER
-  // episode are listed, and taken out only if the user says so.
-  void offerToDropOtherEpisodes();
   void warn(const QString &text);
   void queueAssetPreviews();
   void nextAssetPreview();
@@ -83,7 +80,6 @@ private:
   int         m_updated = 0, m_conflicts = 0, m_notSent = 0;
   QStringList m_warnings;
   int         m_droppedAssets = 0;  // step 3: assets of other episodes removed
-  QStringList m_otherEpisodeIds;  // Kitsu asset ids in another episode
   QTimer     *m_watchdog = nullptr;
   bool        m_autoSyncArmed = false;  // a login happened, no auto Sync yet
   QVector<KitsuTaskPush>      m_pendingTasks;       // step 1, after the shots
