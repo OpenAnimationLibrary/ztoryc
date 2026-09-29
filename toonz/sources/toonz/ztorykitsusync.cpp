@@ -779,12 +779,11 @@ bool ZtoryKitsuSync::start(int handles, QString *why) {
     if (why) *why = tr("A Sync is already running.");
     return false;
   }
-  // A show with neither an episode id nor a name would be read WHOLE: every
-  // episode's shots, assets and statuses into this tracker, and the Sync only
-  // adds. With a name, step 1 finds or creates the episode and binds its id
-  // (episodeResolved) before the first pull.
-  if (m->productionType() == "tvshow" && !m->isKitsuEpisodeLinked() &&
-      m->episode().trimmed().isEmpty()) {
+  // A series syncs only when bound to ONE episode by id (Franco, 2026-09-29):
+  // unbound, the pulls read the WHOLE show — every episode's shots, assets
+  // and statuses into this tracker, and the Sync only adds. A new episode is
+  // created on Kitsu and then linked, not made up by the Sync from a name.
+  if (m->productionType() == "tvshow" && !m->isKitsuEpisodeLinked()) {
     if (why)
       *why = tr("This production is a series: choose its episode in "
                 "«Connect to Kitsu…» before syncing.");

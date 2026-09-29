@@ -44,6 +44,14 @@ compilate (syntax check Qt 5 su Linux e build del worktree di prova), **da colla
   «Linked». Scegliere il PRIMO episodio di una produzione gia' legata non chiede piu' di scrivere
   il nome: la conferma resta per il passaggio da un episodio o da una produzione a un'altra.
 
+- **Il Sync solo con produzione ED episodio, e dice dove va** (Franco: «il sync deve partire solo
+  quando e' connesso a produzione ed episodio e deve essere visibile»). Su una serie senza episodio
+  legato il pulsante Sync (e l'upload delle anteprime) e' spento, con il perche' nel tooltip, e
+  `ZtoryKitsuSync::start` rifiuta: non crea piu' l'episodio da un nome (si crea su Kitsu e si
+  collega). Il pulsante si chiama «⇄ Sync — PRODUZIONE — EPISODIO»; ogni riga di avanzamento e il
+  riepilogo finale ripetono la destinazione, e cosi' la conferma prima di un invio grosso. Alla
+  riconnessione, senza episodio si offre solo «Connect».
+
 ### Added
 - **Diagnostica del render** con `ZTORYC_PLASTIC_DIAG=1`: una riga `LEVELRENDER` per ogni
   immagine di livello caricata (livello, fotogramma, percorso, impronta) e una `PLASTICRENDER` per

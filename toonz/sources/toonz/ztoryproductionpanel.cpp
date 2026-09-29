@@ -458,14 +458,15 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
   connect(sync, &ZtoryKitsuSync::progress, this, [this](const QString &text) {
     if (!m_kitsuSyncLabel) return;
     m_kitsuSyncLabel->setStyleSheet(QString());
-    m_kitsuSyncLabel->setText(text);
+    // Every line carries the target, so it stays readable for the whole Sync.
+    m_kitsuSyncLabel->setText(kitsuBindingText() + "\n" + text);
   });
   connect(sync, &ZtoryKitsuSync::finished, this,
           [this](bool ok, bool warn, const QString &summary) {
             if (m_kitsuSyncLabel) {
               m_kitsuSyncLabel->setStyleSheet(
                   !ok ? "color:#FF3860;" : warn ? "color:#FFB000;" : "color:#22D160;");
-              m_kitsuSyncLabel->setText(summary);
+              m_kitsuSyncLabel->setText(kitsuBindingText() + "\n" + summary);
             }
             rebuildBreakdown();  // step 5 may have changed it
             updateKitsuButtons();
@@ -1220,6 +1221,9 @@ QWidget *ZtoryProductionPanel::buildProjectTab() {
       "merged — what changed on Kitsu comes in, what changed in Ztoryc goes "
       "out. Each task remembers its status at the last sync, so it knows who "
       "changed what; if both changed it, Kitsu's status is kept."));
+  // Kept to put back once an episode is linked (updateKitsuButtons replaces
+  // the tooltip with the reason while the button is off).
+  m_kitsuSyncBtn->setProperty("baseTip", m_kitsuSyncBtn->toolTip());
   kgl->addWidget(m_kitsuSyncBtn);
 
   connect(m_kitsuSyncBtn, &QPushButton::clicked, this,
@@ -1363,10 +1367,23 @@ void ZtoryProductionPanel::updateKitsuButtons() {
                        .arg(KitsuClient::instance()->email())
                  : tr("Log in to Kitsu to push or pull."));
   }
-  // Not while a Sync runs: a second one would interleave its steps.
-  if (m_kitsuSyncBtn)
-    m_kitsuSyncBtn->setEnabled(linked && !ZtoryKitsuSync::instance()->isRunning());
-  if (m_kitsuUploadBtn) m_kitsuUploadBtn->setEnabled(linked);
+  // Not while a Sync runs: a second one would interleave its steps. And not on
+  // a series without its episode: the button says WHERE it syncs, so the
+  // target is read before every click (Franco, 2026-09-29).
+  const bool target = linked && !kitsuEpisodeMissing();
+  if (m_kitsuSyncBtn) {
+    m_kitsuSyncBtn->setEnabled(target &&
+                               !ZtoryKitsuSync::instance()->isRunning());
+    m_kitsuSyncBtn->setText(ZtoryModel::instance()->isKitsuLinked()
+                                ? tr("⇄ Sync — %1").arg(kitsuBindingText())
+                                : tr("⇄ Sync with Kitsu"));
+    m_kitsuSyncBtn->setToolTip(
+        (linked && !target)
+            ? tr("No episode linked. «Connect to Kitsu…», choose the episode "
+                 "row, «Link selected» — then Sync.")
+            : m_kitsuSyncBtn->property("baseTip").toString());
+  }
+  if (m_kitsuUploadBtn) m_kitsuUploadBtn->setEnabled(target);
   if (m_kitsuHandlesCheck) m_kitsuHandlesCheck->setEnabled(linked);
   if (m_kitsuHandlesSpin)  m_kitsuHandlesSpin->setEnabled(linked);
 }
@@ -1406,6 +1423,19 @@ void ZtoryProductionPanel::maybeAutoConnect() {
           ? tr("production «%1»\nepisode «%2»")
                 .arg(m->kitsuProjectName(), m->episode())
           : tr("production «%1»").arg(m->kitsuProjectName());
+  // A series with no episode linked cannot sync (ZtoryKitsuSync::start): the
+  // question then offers the connection only, and says what is missing.
+  if (kitsuEpisodeMissing()) {
+    const int answer = DVGui::MsgBox(
+        tr("Connecting to Kitsu:\n\n%1\n\nNo episode is linked: the Sync "
+           "stays off until you link one in «Connect to Kitsu…».")
+            .arg(target),
+        tr("Connect"), tr("Not now"), 1);
+    if (answer != 1) return;
+    m_syncAfterConnect = false;
+    kc->connectAndSync();
+    return;
+  }
   const int answer = DVGui::MsgBox(
       tr("Connecting to Kitsu:\n\n%1\n\nthen syncing.").arg(target),
       tr("Connect and sync"), tr("Connect only"), tr("Not now"), 1);
@@ -1438,12 +1468,14 @@ void ZtoryProductionPanel::onKitsuSync() {
   const int toSend   = ZtoryKitsuSync::pendingSends();
   const int previews = ZtoryKitsuSync::pendingPreviews();
   if ((toSend > 10 || previews > 10) &&
-      DVGui::MsgBox(tr("This Sync will send %1 statuses from Ztoryc to Kitsu "
-                       "(each only where Kitsu still has the status of the "
-                       "last sync) and upload %2 asset previews (each "
-                       "becomes the asset's cover on Kitsu).\n\nContinue?")
+      DVGui::MsgBox(tr("Sync with %3.\n\nThis Sync will send %1 statuses "
+                       "from Ztoryc to Kitsu (each only where Kitsu still has "
+                       "the status of the last sync) and upload %2 asset "
+                       "previews (each becomes the asset's cover on Kitsu)."
+                       "\n\nContinue?")
                         .arg(toSend)
-                        .arg(previews),
+                        .arg(previews)
+                        .arg(kitsuBindingText()),
                     tr("Sync"), tr("Cancel"), 1) != 1)
     return;
   const int handles =
@@ -1454,6 +1486,10 @@ void ZtoryProductionPanel::onKitsuSync() {
     m_kitsuSyncLabel->setText(why);
     return;
   }
+  // Said as it starts, with the target: the progress lines that follow do not
+  // repeat it.
+  m_kitsuSyncLabel->setStyleSheet(QString());
+  m_kitsuSyncLabel->setText(tr("Syncing with %1…").arg(kitsuBindingText()));
   updateKitsuButtons();
 }
 
