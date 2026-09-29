@@ -29,7 +29,11 @@ Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrova
   dall'INDIRIZZO del `QOpenGLContext` (`tglGetCurrentContext`, su Windows dall'HGLRC), e un
   contesto creato e distrutto per ogni parte riprende sempre lo stesso indirizzo. Ora ogni parte
   usa un `MeshTexturizer` suo, dentro il suo contesto (`tglDraw` accetta i dati del texturizer).
-  Ipotesi dal codice, da collaudare sul Mac.
+  Ipotesi dal codice, da collaudare sul Mac. ⚠️ Non spiega i render da task: tcomposer non ha
+  viewer, quindi nessun contesto registrato, e ad agosto sh110 era riproducibile proprio li'.
+- **Diagnostica del render Plastic**: con `ZTORYC_PLASTIC_DIAG=1` ogni pezzo disegnato stampa una
+  riga `PLASTICRENDER` con livello e fotogramma in ingresso, impronta dei pixel in ingresso e in
+  uscita. Serve a dire se la bocca arriva al corpo gia' in ingresso o la mette OpenGL.
 
 ### Added
 - **Cambiare legame chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.

@@ -37,6 +37,9 @@
 #include <QImage>
 #include <QThread>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
 
 FX_IDENTIFIER_IS_HIDDEN(PlasticDeformerFx, "plasticDeformerFx")
 
@@ -96,6 +99,42 @@ std::string toString(const PlasticSkeletonDeformationP &sd, double sdFrame) {
   }
 
   return result;
+}
+
+//-----------------------------------------------------------------------------------
+// Ztoryc diagnostics, same switch as the render-tree ones in scenefx.cpp
+// (ZTORYC_PLASTIC_DIAG=1 in the environment). One line per drawn piece: what
+// went IN (level, frame, pixel hash) and what came OUT. Written for the Mac
+// renders where one piece shows another's drawing (a mouth on a body): it
+// tells whether the wrong image already arrives as input (cache, level
+// loading) or is right in input and goes wrong in the OpenGL draw.
+
+bool renderDiagOn() {
+  static const bool on = (::getenv("ZTORYC_PLASTIC_DIAG") != nullptr);
+  return on;
+}
+
+// FNV-1a over the visible pixels, row by row (the wrap may be wider).
+unsigned long long rasterHash(const TRasterP &ras) {
+  unsigned long long h = 1469598103934665603ULL;
+  if (!ras) return 0;
+  ras->lock();
+  const int rowBytes = ras->getLx() * ras->getPixelSize();
+  const int wrap     = ras->getWrap() * ras->getPixelSize();
+  const unsigned char *row = ras->getRawData();
+  for (int y = 0; y < ras->getLy(); ++y, row += wrap)
+    for (int x = 0; x < rowBytes; ++x) {
+      h ^= row[x];
+      h *= 1099511628211ULL;
+    }
+  ras->unlock();
+  return h;
+}
+
+std::string hex(unsigned long long v) {
+  char buf[20];
+  snprintf(buf, sizeof buf, "%016llx", v);
+  return buf;
 }
 
 }  // namespace
@@ -343,6 +382,24 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
 
   TTile origTile(tile.getRaster()->clone());
 
+  std::string diagLine;
+  if (renderDiagOn()) {
+    std::string texName = "(sub-xsheet)", texFrame;
+    if (TLevelColumnFx *lcfx = dynamic_cast<TLevelColumnFx *>(m_port.getFx())) {
+      const TXshCell texCell = lcfx->getColumn()->getCell(row);
+      texName = texCell.m_level ? ::to_string(texCell.m_level->getName()) : "(empty)";
+      texFrame = texCell.getFrameId().expand();
+      if (TXshSimpleLevel *tsl = texCell.getSimpleLevel())
+        texName += " path='" + ::to_string(tsl->getPath().getWideString()) + "'";
+    }
+    diagLine = "PLASTICRENDER frame=" + std::to_string(frame) +
+               " meshCol=" + std::to_string(m_col) + " mesh='" +
+               ::to_string(meshSl->getName()) + "' meshFid=" + meshFid.expand() +
+               " tex='" + texName + "' texFid=" + texFrame + " in=" +
+               std::to_string(tileSize.lx) + "x" + std::to_string(tileSize.ly) +
+               " inHash=" + hex(rasterHash(inTile.getRaster()));
+  }
+
   // Draw the textured mesh using the working approach
   {
     // Prepare texture
@@ -485,6 +542,10 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
         TRop::ropin(origTile.getRaster(), tile.getRaster(), tile.getRaster());
     }
   }
+
+  if (!diagLine.empty())
+    std::cout << diagLine << " outHash=" << hex(rasterHash(tile.getRaster()))
+              << std::endl;
   // Verify no OpenGL errors
   GLenum err = glGetError();
   if (err != GL_NO_ERROR) {
