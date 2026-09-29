@@ -63,6 +63,12 @@ compilate (syntax check Qt 5 su Linux e build del worktree di prova), **da colla
 - **«● Connected — PRODUZIONE — EPISODIO»** sul pulsante Kitsu e l'episodio nella riga «Linked».
 
 ### Notes
+- ⚠️ **Sul Mac di Franco `master` locale seguiva `upstream/master` (Tahoma2D)**, non `origin`:
+  `git pull` si fermava con «divergent branches» e `build_and_deploy.sh`, lanciato subito dopo,
+  ricompilava il codice vecchio senza dirlo (render di nuovo rovinato, Kitsu come prima).
+  Rimedio dato: `git branch --set-upstream-to=origin/master master`, poi
+  `git merge --ff-only origin/master`. Le novita' di Tahoma2D si portano con
+  `git fetch upstream` + `git merge upstream/master`, esplicitamente.
 - Review `ztoryc-reviewer` (modalita' «debito») sui file toccati rimandata a venerdi', per
   decisione di Franco: il branch va su master subito.
 
