@@ -1,14 +1,31 @@
-## [2026-09-29] — Kitsu: il legame con l'episodio non si sposta piu' per sbaglio
+## [2026-09-29] — render con i personaggi da PSD: trovata la causa (sh110); Kitsu: il legame con l'episodio non si sposta piu'
 
-Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrovato legato a CS2605
-(Cascina) e ha importato i 29 asset di Cascina. Scritto in sessione cloud: controllato che compili
-(syntax check con Qt 5 su Linux), **non compilato ne' collaudato sul Mac**.
+Sessione cloud. Il render e' **collaudato da Franco sul Mac**; le modifiche Kitsu sono solo
+compilate (syntax check Qt 5 su Linux e build del worktree di prova), **da collaudare**.
 
 ### Fixed
+- **Render sbagliato con i personaggi da PSD — la causa di sh110** (`tcolumnfx.cpp`,
+  `TLevelColumnFx::getAlias`). Sintomo: sul Mac, scene con molti personaggi Plastic importati da
+  PSD in sottoscene uscivano con parti mancanti o scambiate (bocche al posto dei corpi); lo stesso
+  fotogramma renderizzato da solo era giusto, dentro una sequenza no. L'alias di ogni livello era
+  `path.withFrame(fid)`, che RI-INTERPRETA il nome del file come sequenza: con la regola dei nomi
+  Standard `ch_sofia#corpo#group.psd` al fotogramma 1 diventa `ch.1.psd` (tutto cio' che segue il
+  primo `_` preso per il fotogramma). Tutti gli strati PSD di un personaggio avevano lo stesso
+  alias, e la cache delle immagini del render (`LevelFxBuilder`, `alias + "_image"`) in sequenza
+  serviva a uno strato l'immagine di un altro, o nessuna. Misurato: in sequenza, al fotogramma 1,
+  Sofia caricava 2 strati su 13, Rompolo, Eolo e Cucciolo perdevano il corpo; la funzione vera,
+  compilata a parte, rende `…/SOFIA/ch.1.psd` per ogni strato. Ora l'alias e' il percorso intero
+  piu' `|frame=<fid>`, senza interpretazione. Metodo che ha funzionato: lo stesso fotogramma da
+  solo (buono) e dentro una sequenza (cattivo), confrontati riga per riga con la diagnostica.
+  **Aperto:** perche' Windows (0.10 e 0.15) rendeva bene la stessa scena dallo stesso progetto su
+  Drive. Ipotesi non verificata: su Mac/Linux `TSystem::memoryShortage()` risponde sempre «no»,
+  la cache non si svuota e le immagini vengono riusate; su Windows si'.
+  Due modifiche OpenGL a `plasticdeformerfx.cpp` fatte lungo la strada sono state tolte: non
+  correggevano niente di osservato.
 - **Il dialogo Kitsu ripartiva dalla prima riga**: se la riga legata non era nella lista (rete
   tornata a meta', episodi non letti), la tendina restava sulla prima — CS2605 in ordine
-  alfabetico — e «Link selected» ci spostava il progetto. Ora nessuna riga, «Link selected»
-  spento e un avviso.
+  alfabetico — e «Link selected» ci spostava il progetto (CS2606 Messina finito su Cascina con
+  29 asset non suoi). Ora nessuna riga, «Link selected» spento e un avviso.
 - **Serie con gli episodi non letti**: la serie compariva come riga unica, e collegarla toglieva
   l'episodio, aprendo i pull a tutta la serie. Ora si rifiuta.
 - **Codice episodio rimasto dal legame precedente** passando a una produzione senza episodi o
@@ -17,49 +34,19 @@ Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrova
   primo Sync creava l'episodio ma non ne salvava l'id, e ogni pull leggeva tutti gli episodi.
   Ora lo lega (`episodeResolved`). Una serie senza episodio ne' nome non si sincronizza piu'.
 
-- **Render con Plastic: parti che sparivano dopo qualche decina di fotogrammi** (8 personaggi da
-  PSD in sottoscene; task in JPEG buono fino al fotogramma 40, MP4 dal programma rotto da subito).
-  Ogni parte creava texture e framebuffer in un contesto OpenGL condiviso con il viewer, e li
-  distruggeva DOPO aver rilasciato il contesto: non venivano mai liberati, e a memoria video finita
-  le texture nuove uscivano vuote. Ora niente condivisione, e si liberano col contesto ancora
-  attivo (`plasticdeformerfx.cpp`). Da collaudare sul Mac.
-- **Render con Plastic sul Mac: bocche al posto dei corpi** (la stessa scena esce giusta su
-  Windows, anche con un solo personaggio acceso). Le texture del render passavano da
-  `TTexturesStorage`, che le archivia per contesto OpenGL; su macOS il contesto e' riconosciuto
-  dall'INDIRIZZO del `QOpenGLContext` (`tglGetCurrentContext`, su Windows dall'HGLRC), e un
-  contesto creato e distrutto per ogni parte riprende sempre lo stesso indirizzo. Ora ogni parte
-  usa un `MeshTexturizer` suo, dentro il suo contesto (`tglDraw` accetta i dati del texturizer).
-  Ipotesi dal codice, da collaudare sul Mac. ⚠️ Non spiega i render da task: tcomposer non ha
-  viewer, quindi nessun contesto registrato, e ad agosto sh110 era riproducibile proprio li'.
-- **Diagnostica del render Plastic**: con `ZTORYC_PLASTIC_DIAG=1` ogni pezzo disegnato stampa una
-  riga `PLASTICRENDER` con livello e fotogramma in ingresso, impronta dei pixel in ingresso e in
-  uscita. Serve a dire se la bocca arriva al corpo gia' in ingresso o la mette OpenGL.
-  **Prima misura (sh110_test, Mac):** il fotogramma 1 renderizzato da solo esce giusto, dentro una
-  sequenza 1-60 sbagliato. In sequenza 4 personaggi su 6 in quadro ricevono un'immagine in ingresso
-  DIVERSA (stesse dimensioni, stessa posizione, `glErr=0`): la sottoscena del personaggio arriva
-  gia' sbagliata alla mesh. Non e' OpenGL. Aggiunta una riga `LEVELRENDER` per ogni livello caricato
-  (`TLevelColumnFx::doCompute`): livello, fotogramma, percorso, impronta dell'immagine.
-
-- **CAUSA TROVATA del render sbagliato con i personaggi da PSD (sh110 e seguenti)** — `tcolumnfx.cpp`,
-  `TLevelColumnFx::getAlias`. L'alias di ogni livello era `path.withFrame(fid)`, che RI-INTERPRETA il
-  nome del file come sequenza: con la regola Standard `ch_sofia#corpo#group.psd` al fotogramma 1
-  diventa `ch.1.psd` (tutto quello che segue il primo `_` preso per il fotogramma). Tutti gli strati
-  PSD di un personaggio avevano quindi LO STESSO alias, e il render, che mette in cache le immagini
-  per alias (`LevelFxBuilder`, `alias + "_image"`), in sequenza serviva a uno strato l'immagine di
-  un altro (la bocca al posto del corpo) o nessuna (la parte sparisce). Da solo il fotogramma usciva
-  giusto perche' la cache non viene riusata. Misurato: in sequenza, fotogramma 1, Sofia carica 2
-  strati su 13, Rompolo perde `CORPO`, Eolo `corpoeolo`, Cucciolo `corpo`; la funzione vera,
-  compilata a parte, rende `…/SOFIA/ch.1.psd` per ogni strato. Ora l'alias e' il percorso intero
-  piu' `|frame=<fid>`: nessuna interpretazione. Spiega anche il «prima rendeva, poi no» di agosto
-  solo se nel frattempo e' cambiata la regola dei nomi del progetto o il modo di importare i PSD:
-  da verificare. **Collaudato da Franco sul Mac** (sh110_test, render corretto). Resta da capire
-  perche' Windows rendeva bene la stessa scena dallo stesso progetto su Drive.
-
 ### Added
-- **Cambiare legame chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.
+- **Diagnostica del render** con `ZTORYC_PLASTIC_DIAG=1`: una riga `LEVELRENDER` per ogni
+  immagine di livello caricata (livello, fotogramma, percorso, impronta) e una `PLASTICRENDER` per
+  ogni pezzo Plastic disegnato (impronta in ingresso, dove cade la mesh, errori GL, pixel
+  disegnati, impronta in uscita). Spenta, non fa niente.
+- **Cambiare legame con Kitsu chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.
 - **Riconnessione all'apertura** del tracker, con le credenziali salvate, dopo una domanda che
   dice produzione ed episodio: «Connect and sync» / «Connect only» / «Not now».
 - **«● Connected — PRODUZIONE — EPISODIO»** sul pulsante Kitsu e l'episodio nella riga «Linked».
+
+### Notes
+- Review `ztoryc-reviewer` (modalita' «debito») sui file toccati rimandata a venerdi', per
+  decisione di Franco: il branch va su master subito.
 
 ## [2026-09-28] — Board: clona/incolla da 6,6 s a 0,5 s, merge senza pannelli inventati, task per uuid
 

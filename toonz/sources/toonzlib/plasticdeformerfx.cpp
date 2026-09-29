@@ -104,10 +104,8 @@ std::string toString(const PlasticSkeletonDeformationP &sd, double sdFrame) {
 //-----------------------------------------------------------------------------------
 // Ztoryc diagnostics, same switch as the render-tree ones in scenefx.cpp
 // (ZTORYC_PLASTIC_DIAG=1 in the environment). One line per drawn piece: what
-// went IN (level, frame, pixel hash) and what came OUT. Written for the Mac
-// renders where one piece shows another's drawing (a mouth on a body): it
-// tells whether the wrong image already arrives as input (cache, level
-// loading) or is right in input and goes wrong in the OpenGL draw.
+// went IN (pixel hash) and where it landed, what came OUT. It is how the sh110
+// render was traced to the level aliases (tcolumnfx.cpp) in 2026-09.
 
 bool renderDiagOn() {
   static const bool on = (::getenv("ZTORYC_PLASTIC_DIAG") != nullptr);
@@ -418,15 +416,17 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     // Prepare texture
     TRaster32P tex(inTile.getRaster());
     TRop::depremultiply(tex);
+    static TAtomicVar var;
+    const std::string &texId = "render_tex " + std::to_string(++var);
+
     // Use the working context creation approach
     std::unique_ptr<QOpenGLContext> context(new QOpenGLContext());
     context->moveToThread(QThread::currentThread());
 
-    // NOT shared with the context already current (the viewer's, in the app):
-    // the texture and the FBO are created and used here only, and in a shared
-    // group they outlived this context — one PSD layer's texture leaked per
-    // part and per frame until VRAM ran out and parts rendered empty (Franco,
-    // 2026-09-29: a task render good for 40 frames, then broken).
+    // Share context with current if available
+    if (QOpenGLContext::currentContext())
+      context->setShareContext(QOpenGLContext::currentContext());
+
     context->setFormat(QSurfaceFormat::defaultFormat());
 
     if (!context->create()) {
@@ -442,10 +442,7 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     }
 
     TDimension d = tile.getRaster()->getSize();
-    // Owned here so it can be destroyed while the context is still current.
-    std::unique_ptr<QOpenGLFramebufferObject> fbo(
-        new QOpenGLFramebufferObject(d.lx, d.ly));
-    QOpenGLFramebufferObject &fb = *fbo;
+    QOpenGLFramebufferObject fb(d.lx, d.ly);
 
     if (!fb.bind()) {
       TSysLog::error("PlasticDeformerFx: Failed to bind FBO");
@@ -453,17 +450,9 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
       return;
     }
 
-    // Load texture — into a texturizer owned by THIS context, not through
-    // TTexturesStorage. The storage files textures by display-lists space,
-    // found from the current context; on macOS and Linux the context is known
-    // by its QOpenGLContext ADDRESS (tglGetCurrentContext), and a context
-    // created and deleted per part gets the same address again and again. A
-    // stale entry was then enough to put a texture in the wrong container:
-    // mouths drawn on bodies, on the Mac only (Windows keys on HGLRC).
-    std::unique_ptr<MeshTexturizer> texturizer(new MeshTexturizer);
-    const int texIdx = texturizer->bindTexture(tex, bbox);
-    const MeshTexturizer::TextureData *texData =
-        texturizer->getTextureData(texIdx);
+    // Load texture
+    TTexturesStorage *ts                = TTexturesStorage::instance();
+    const DrawableTextureDataP &texData = ts->loadTexture(texId, tex, bbox);
     if (!texData) {
       TSysLog::error("PlasticDeformerFx: Failed to load texture data");
       fb.release();
@@ -494,10 +483,9 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
                                   squashCtrl * meshToWorldMeshAff;
     tglMultMatrix(meshToTileAff);
     // Where the (undeformed) mesh lands in the tile, in pixels: a piece that
-    // comes out empty with a full input is either off the tile or lost in GL.
+    // comes out empty with a full input is off the tile or lost in GL.
     if (!diagLine.empty())
-      diagLine += " meshInTile=" + rectStr(meshToTileAff * mi->getBBox()) +
-                  " texTiles=" + std::to_string(texData->m_tileDatas.size());
+      diagLine += " meshInTile=" + rectStr(meshToTileAff * mi->getBBox());
 
     glEnable(GL_BLEND);
     glEnable(GL_TEXTURE_2D);
@@ -520,8 +508,7 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
         for (int x = 0; x < img.width(); ++x)
           if (qAlpha(line[x])) ++drawn;
       }
-      diagLine += " fboPixels=" + std::to_string(drawn) + " fmt=" +
-                  std::to_string((int)img.format());
+      diagLine += " fboPixels=" + std::to_string(drawn);
     }
     int wrap      = tile.getRaster()->getLx() * sizeof(TPixel32);
     if (!m_was64bit) {
@@ -558,13 +545,8 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     glFinish();
 
 
-    // Free the GL objects BEFORE giving the context up: glDeleteTextures and
-    // the FBO's destructor act on the CURRENT context. Released after
-    // doneCurrent() (as they were, at the end of the block) they deleted
-    // nothing.
-    texturizer->unbindTexture(texIdx);
-    texturizer.reset();
-    fbo.reset();
+    // Unload texture to prevent memory leaks
+    // ts->unloadTexture(texId); // Auto-released ttexturesstorage??
     context->moveToThread(0);
     context->doneCurrent();
 
@@ -579,6 +561,7 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
   if (!diagLine.empty())
     std::cout << diagLine << " outHash=" << hex(rasterHash(tile.getRaster()))
               << std::endl;
+
   // Verify no OpenGL errors
   GLenum err = glGetError();
   if (err != GL_NO_ERROR) {

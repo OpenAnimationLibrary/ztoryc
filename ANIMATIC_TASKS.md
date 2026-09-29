@@ -136,13 +136,15 @@ degli status).
   usava `path.withFrame(fid)`, che con la regola dei nomi Standard riduce
   `ch_sofia#corpo#group.psd` a `ch.1.psd` → tutti gli strati PSD di un
   personaggio con lo stesso alias → la cache delle immagini del render
-  (`LevelFxBuilder`) li scambiava, solo in sequenza. Branch
-  `claude/dreamy-ride-rvt04i`, `d2bc410c`. Misurato con le righe
+  (`LevelFxBuilder`) li scambiava, solo in sequenza. Commit `d2bc410c`, su master. Misurato con le righe
   `LEVELRENDER`/`PLASTICRENDER` (`ZTORYC_PLASTIC_DIAG=1`), metodo: stesso
   fotogramma da solo (buono) e dentro una sequenza (cattivo).
   **Aperto:** perche' Windows (0.10 e 0.15) rendeva bene la stessa scena, dallo
-  stesso progetto su Drive. Due modifiche OpenGL fatte lungo la strada
-  (`08eb52e`, `9ed0ed4f`) non c'entravano: decidere se tenerle.
+  stesso progetto su Drive. Le due modifiche OpenGL fatte lungo la strada sono state tolte.
+  **Venerdi' (deciso da Franco):** `ztoryc-reviewer` in modalita' «debito» sui file
+  del 29/09 — `tcolumnfx.cpp`, `plasticdeformerfx.cpp`, `kitsuconnectdialog.cpp/.h`,
+  `kitsuclient.cpp/.h`, `ztorykitsusync.cpp`, `ztoryproductionpanel.cpp/.h` — e
+  collaudo delle modifiche Kitsu (popup di riconnessione, conferma col nome).
 
 - 🐞 **DUE DIFETTI ZtoRig segnalati usandolo** (Franco, 2026-08-16, mentre
   costruiva il primo personaggio). Non affrontati subito per sua indicazione
