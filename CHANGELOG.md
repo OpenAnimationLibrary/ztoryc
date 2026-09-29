@@ -1,3 +1,28 @@
+## [2026-09-29] — Kitsu: il legame con l'episodio non si sposta piu' per sbaglio
+
+Franco: dopo qualche ora senza rete il tracker di CS2606 (Messina) si e' ritrovato legato a CS2605
+(Cascina) e ha importato i 29 asset di Cascina. Scritto in sessione cloud: controllato che compili
+(syntax check con Qt 5 su Linux), **non compilato ne' collaudato sul Mac**.
+
+### Fixed
+- **Il dialogo Kitsu ripartiva dalla prima riga**: se la riga legata non era nella lista (rete
+  tornata a meta', episodi non letti), la tendina restava sulla prima — CS2605 in ordine
+  alfabetico — e «Link selected» ci spostava il progetto. Ora nessuna riga, «Link selected»
+  spento e un avviso.
+- **Serie con gli episodi non letti**: la serie compariva come riga unica, e collegarla toglieva
+  l'episodio, aprendo i pull a tutta la serie. Ora si rifiuta.
+- **Codice episodio rimasto dal legame precedente** passando a una produzione senza episodi o
+  creandone una nuova su Kitsu: ora si azzera.
+- **Episodio creato dal Sync mai legato**: su una serie legata quando non aveva ancora episodi, il
+  primo Sync creava l'episodio ma non ne salvava l'id, e ogni pull leggeva tutti gli episodi.
+  Ora lo lega (`episodeResolved`). Una serie senza episodio ne' nome non si sincronizza piu'.
+
+### Added
+- **Cambiare legame chiede di scrivere il nome** dell'episodio (o della produzione) nuovo.
+- **Riconnessione all'apertura** del tracker, con le credenziali salvate, dopo una domanda che
+  dice produzione ed episodio: «Connect and sync» / «Connect only» / «Not now».
+- **«● Connected — PRODUZIONE — EPISODIO»** sul pulsante Kitsu e l'episodio nella riga «Linked».
+
 ## [2026-09-28] — Board: clona/incolla da 6,6 s a 0,5 s, merge senza pannelli inventati, task per uuid
 
 Collaudato da Franco su CS2605 (Cascina). Commit `d8dbf7e83`, `58f649800`, `8f32bd3fc`.

@@ -490,6 +490,7 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
   // As soon as we're connected, pull the project's team so the assignee picker is
   // populated from Kitsu (Kitsu is authoritative on the roster while linked).
   connect(kc, &KitsuClient::loginFinished, this, [this](bool ok, const QString &) {
+    if (!ok) m_skipAutoSync = false;  // no login, no Sync to skip
     updateKitsuButtons();  // connection line + button text + Push/Pull
     ZtoryModel *mm = ZtoryModel::instance();
     if (ok && mm->isKitsuLinked())
@@ -537,6 +538,9 @@ void ZtoryProductionPanel::showEvent(QShowEvent *e) {
   // This also picks up a project switch made while the tracker was hidden.
   ZtoryModel::instance()->loadProjectDb();
   onModelChanged();  // rebuild every tab from the freshly loaded DB
+  // After the show, not inside it: the question is modal and the room is
+  // still being laid out.
+  QTimer::singleShot(0, this, [this]() { maybeAutoConnect(); });
 
   // Show the exit bar only when this tracker IS the standalone Production room.
   // Gate on the room *choice* ("Production", the room-set folder name), not the
@@ -1310,7 +1314,7 @@ void ZtoryProductionPanel::reloadProjectTab() {
   const bool linked = m->isKitsuLinked();
   if (m_kitsuLabel) {
     if (linked) {
-      QString info = tr("🔗 Linked: %1").arg(m->kitsuProjectName());
+      QString info = tr("🔗 Linked: %1").arg(kitsuBindingText());
       if (!m->productionType().isEmpty())
         info += "  ·  " + m->productionType();
       if (!m->resolution().isEmpty())
@@ -1341,8 +1345,13 @@ void ZtoryProductionPanel::updateKitsuButtons() {
   // statuses), so the button stays clickable — but it says the state instead
   // of offering to connect again.
   if (m_kitsuConnectBtn) {
-    m_kitsuConnectBtn->setText(loggedIn ? tr("● Connected")
-                                        : tr("Connect to Kitsu…"));
+    // Connected TO WHAT: the production alone was not enough to notice a
+    // project bound to another episode of the same show.
+    const bool bound = ZtoryModel::instance()->isKitsuLinked();
+    m_kitsuConnectBtn->setText(
+        !loggedIn ? tr("Connect to Kitsu…")
+        : bound   ? tr("● Connected — %1").arg(kitsuBindingText())
+                  : tr("● Connected"));
     m_kitsuConnectBtn->setStyleSheet(loggedIn ? "color:#22D160;" : QString());
     m_kitsuConnectBtn->setToolTip(
         loggedIn ? tr("Connected as %1.\nClick for the Kitsu settings: "
@@ -1358,6 +1367,38 @@ void ZtoryProductionPanel::updateKitsuButtons() {
   if (m_kitsuHandlesSpin)  m_kitsuHandlesSpin->setEnabled(linked);
 }
 
+QString ZtoryProductionPanel::kitsuBindingText() {
+  ZtoryModel *m = ZtoryModel::instance();
+  if (!m->isKitsuEpisodeLinked()) return m->kitsuProjectName();
+  return QString("%1 — %2").arg(m->kitsuProjectName(), m->episode());
+}
+
+void ZtoryProductionPanel::maybeAutoConnect() {
+  ZtoryModel *m   = ZtoryModel::instance();
+  KitsuClient *kc = KitsuClient::instance();
+  if (!m->isKitsuLinked() || kc->isLoggedIn()) return;
+  if (kc->email().isEmpty() || !kc->hasSavedPassword()) return;
+  // Once per project and session: offline, a retry at every show of the
+  // panel would only stack failed logins. The dialog stays the way to retry.
+  const QString key = m->projectDbPath();
+  if (key.isEmpty() || key == m_autoConnectTried) return;
+  m_autoConnectTried = key;
+  // Said before doing it, with the target in full: the reconnection must
+  // never go somewhere the user did not read (Franco, 2026-09-29).
+  // Plain text: the message box guesses rich text by itself.
+  const QString target =
+      m->isKitsuEpisodeLinked()
+          ? tr("production «%1»\nepisode «%2»")
+                .arg(m->kitsuProjectName(), m->episode())
+          : tr("production «%1»").arg(m->kitsuProjectName());
+  const int answer = DVGui::MsgBox(
+      tr("Connecting to Kitsu:\n\n%1\n\nthen syncing.").arg(target),
+      tr("Connect and sync"), tr("Connect only"), tr("Not now"), 1);
+  if (answer != 1 && answer != 2) return;  // «Not now», or the box closed
+  m_skipAutoSync = (answer == 2);
+  kc->connectAndSync();  // loginFinished -> maybeAutoSync()
+}
+
 // The Sync that starts by itself when the connection to Kitsu is made, so
 // that Ztoryc works from Kitsu's latest. Same confirmation as the button
 // when it would write a lot (onKitsuSync).
@@ -1366,6 +1407,10 @@ void ZtoryProductionPanel::maybeAutoSync() {
   if (!kc->isLoggedIn() || !kc->hasTaskStatuses()) return;
   if (!ZtoryModel::instance()->isKitsuLinked()) return;
   if (!ZtoryKitsuSync::instance()->takeAutoSync()) return;
+  if (m_skipAutoSync) {  // «Connect only»: this login's Sync, and no other
+    m_skipAutoSync = false;
+    return;
+  }
   onKitsuSync();
 }
 

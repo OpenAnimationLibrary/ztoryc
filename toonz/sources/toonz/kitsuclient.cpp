@@ -520,7 +520,11 @@ void KitsuClient::pushEnsureEpisode() {
         break;
       }
     }
-    if (!m_pushEpisodeId.isEmpty()) { pushLoadSequences(); return; }
+    if (!m_pushEpisodeId.isEmpty()) {
+      emit episodeResolved(m_pushProjectId, m_pushEpisodeId, m_pushEpisodeName);
+      pushLoadSequences();
+      return;
+    }
     QJsonObject body;
     body["name"] = m_pushEpisodeName;
     QNetworkReply *cr =
@@ -531,6 +535,8 @@ void KitsuClient::pushEnsureEpisode() {
       const QByteArray cb = cr->readAll();
       if (cr->error() != QNetworkReply::NoError) { pushFail(errorMessage(cr, cb)); return; }
       m_pushEpisodeId = QJsonDocument::fromJson(cb).object().value("id").toString();
+      if (!m_pushEpisodeId.isEmpty())
+        emit episodeResolved(m_pushProjectId, m_pushEpisodeId, m_pushEpisodeName);
       pushLoadSequences();
     });
   });

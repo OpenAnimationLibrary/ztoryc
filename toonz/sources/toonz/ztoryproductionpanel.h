@@ -69,6 +69,16 @@ class ZtoryProductionPanel final : public TPanel {
   QPushButton  *m_kitsuSyncBtn = nullptr;
   void onKitsuSync();
   void maybeAutoSync();  // once per login, when the statuses are there
+  // A linked project reconnects by itself when the tracker opens, with the
+  // saved credentials: the binding is the project's, not the dialog's, and
+  // reconnecting through the dialog is where a wrong row got linked.
+  void maybeAutoConnect();
+  QString m_autoConnectTried;  // project DB path already tried this session
+  // «Connect only» in the reconnect question: the Sync that follows the
+  // login is skipped once (maybeAutoSync), the connection stays.
+  bool m_skipAutoSync = false;
+  // «Production — Episode», or the production alone, for the Kitsu labels.
+  static QString kitsuBindingText();
   QCheckBox    *m_kitsuHandlesCheck = nullptr;
   QSpinBox     *m_kitsuHandlesSpin  = nullptr;
   QLabel       *m_kitsuSyncLabel = nullptr;

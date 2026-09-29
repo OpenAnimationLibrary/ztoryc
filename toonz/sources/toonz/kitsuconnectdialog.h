@@ -31,6 +31,11 @@ private:
   void onCreateClicked();  // create a new Kitsu project from the Ztoryc model (push)
   void setBusy(bool busy);
   void updateBindingButtons();
+  // Moving a project that is already bound to another Kitsu production or
+  // episode. A wrong row there mixes two episodes in one tracker, and the Sync
+  // only ever adds: so the user must type the name of the new target.
+  // True when there is nothing bound yet, or the user typed it and confirmed.
+  bool confirmRebind(const QString &newTarget, const QString &typeThis);
   // Fill the production list. A tvshow is listed once PER EPISODE, because a
   // Ztoryc project maps to one episode and not to the whole show; everything
   // else keeps a single row. Each row carries the project id in Qt::UserRole

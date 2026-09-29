@@ -452,6 +452,12 @@ signals:
   // Resolved Kitsu shot ids per "seq\nlabel" key — lets the caller record them so
   // later syncs are rename-proof. Emitted just before shotsPushed.
   void shotIdsResolved(const QHash<QString, QString> &byKey);
+  // The episode the shot push found or created on Kitsu, by id. A project that
+  // named its episode but was never bound to its id (a show with no episodes
+  // at link time) records it from here — without, every pull of that project
+  // keeps reading ALL the show's episodes.
+  void episodeResolved(const QString &projectId, const QString &episodeId,
+                       const QString &episodeName);
   void shotsPushed(bool ok, int created, int updated, const QString &message);
   void tasksPushed(bool ok, int statusesSet, const QString &message);
   // Workflow task types that could not reach Kitsu because the server has no

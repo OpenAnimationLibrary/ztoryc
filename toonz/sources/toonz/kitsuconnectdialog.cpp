@@ -24,6 +24,7 @@
 #include <QFileDialog>
 #include <QDir>
 #include <QFileInfo>
+#include <QDialogButtonBox>
 
 KitsuConnectDialog::KitsuConnectDialog(QWidget *parent)
     : QDialog(parent), m_client(KitsuClient::instance()) {
@@ -124,6 +125,8 @@ KitsuConnectDialog::KitsuConnectDialog(QWidget *parent)
   connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
   connect(m_linkBtn, &QPushButton::clicked, this,
           &KitsuConnectDialog::onLinkClicked);
+  connect(m_projectCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, [this](int) { updateBindingButtons(); });
   connect(m_createBtn, &QPushButton::clicked, this,
           &KitsuConnectDialog::onCreateClicked);
 
@@ -164,6 +167,9 @@ KitsuConnectDialog::KitsuConnectDialog(QWidget *parent)
             m->setProduction(p.name);
             m->setCode(p.code);
             m->setKitsuProject(p.id, p.name);
+            // A new production has none of the old one's episodes.
+            if (m->isKitsuEpisodeLinked())
+              m->setKitsuEpisode(QString(), m->episode());
             m->saveProjectDb();
             m_statusLabel->setText(tr("Created & linked: %1").arg(p.name));
             updateBindingButtons();     // push becomes available
@@ -243,12 +249,24 @@ void KitsuConnectDialog::rebuildProjectCombo() {
   const QString boundProj = m->kitsuProjectId();
   const QString boundEp   = m->kitsuEpisodeId();
   if (!boundProj.isEmpty()) {
+    int found = -1;
     for (int i = 0; i < m_projectCombo->count(); ++i) {
       if (m_projectCombo->itemData(i).toString() != boundProj) continue;
       if (m_projectCombo->itemData(i, Qt::UserRole + 1).toString() != boundEp)
         continue;
-      m_projectCombo->setCurrentIndex(i);
+      found = i;
       break;
+    }
+    // Not in the list (a connection that came back half-way, episodes that
+    // could not be read): NO row, rather than the first one. Left on row 0,
+    // «Link selected» moved CS2606 onto CS2605 — the first episode in
+    // alphabetical order (Franco, 2026-09-29).
+    m_projectCombo->setCurrentIndex(found);
+    if (found < 0) {
+      m_statusLabel->setStyleSheet("color:#FFB000;");
+      m_statusLabel->setText(
+          tr("The linked production/episode is not in the list Kitsu sent. "
+             "The link is unchanged; reconnect before choosing another row."));
     }
   }
   updateBindingButtons();
@@ -256,7 +274,7 @@ void KitsuConnectDialog::rebuildProjectCombo() {
 
 void KitsuConnectDialog::updateBindingButtons() {
   const bool connected = m_client->isLoggedIn();
-  m_linkBtn->setEnabled(connected && m_projectCombo->count() > 0);
+  m_linkBtn->setEnabled(connected && m_projectCombo->currentIndex() >= 0);
   const bool canManage = connected && m_client->canManageProjects();
   m_createBtn->setEnabled(canManage);
   if (connected && !canManage)
@@ -283,6 +301,26 @@ void KitsuConnectDialog::onLinkClicked() {
     if (e.id == episodeId) { episodeName = e.name; break; }
 
   ZtoryModel *m = ZtoryModel::instance();
+  const bool sameProject = (id == m->kitsuProjectId());
+  // A show listed as a single row while we are bound to one of its episodes:
+  // its episodes could not be read. Linking it would drop the episode and
+  // open the pulls to the whole show.
+  if (sameProject && sel.isTvshow() && episodeId.isEmpty() &&
+      m->isKitsuEpisodeLinked()) {
+    m_statusLabel->setStyleSheet("color:#FF3860;");
+    m_statusLabel->setText(
+        tr("Kitsu did not send the episodes of %1: reconnect and try again.")
+            .arg(sel.name));
+    return;
+  }
+  if (!sameProject || episodeId != m->kitsuEpisodeId()) {
+    // What to type: the episode when the row has one, else the production.
+    const QString typeThis = episodeName.isEmpty() ? sel.name : episodeName;
+    const QString target   = episodeName.isEmpty()
+                                 ? sel.name
+                                 : QString("%1 — %2").arg(episodeName, sel.name);
+    if (!confirmRebind(target, typeThis)) return;
+  }
   m->setProduction(sel.name);
   m->setCode(sel.code);
   if (!sel.fps.isEmpty()) m->setFps(sel.fps.toInt());
@@ -294,7 +332,13 @@ void KitsuConnectDialog::onLinkClicked() {
   // Only overwrite the episode when a row actually carries one: on a show with
   // no episodes yet the user may have typed a name in the tracker, and binding
   // must not wipe it — pushEnsureEpisode() will create it under that name.
-  if (!episodeId.isEmpty()) m->setKitsuEpisode(episodeId, episodeName);
+  if (!episodeId.isEmpty())
+    m->setKitsuEpisode(episodeId, episodeName);
+  else if (!sameProject || m->isKitsuEpisodeLinked())
+    // A row without episodes, on another production or replacing an episode
+    // binding: the old id belongs to what we are leaving. Kept, the pulls
+    // would go on filtering on an episode of a different production.
+    m->setKitsuEpisode(QString(), m->episode());
   m->saveProjectDb();
 
   // Pull the project's team right away so the assignee picker is populated
@@ -316,6 +360,8 @@ void KitsuConnectDialog::onCreateClicked() {
     m_statusLabel->setText(tr("Set a Production name before creating the project."));
     return;
   }
+  if (!confirmRebind(m->production().trimmed(), m->production().trimmed()))
+    return;
   KitsuProject p;
   p.name            = m->production().trimmed();
   p.code            = m->code().trimmed();
@@ -348,4 +394,50 @@ void KitsuConnectDialog::onConnectClicked() {
 
 void KitsuConnectDialog::setBusy(bool busy) {
   m_connectBtn->setEnabled(!busy);
+}
+
+bool KitsuConnectDialog::confirmRebind(const QString &newTarget,
+                                       const QString &typeThis) {
+  ZtoryModel *m = ZtoryModel::instance();
+  if (!m->isKitsuLinked()) return true;  // first binding: nothing to lose
+  const QString current =
+      m->isKitsuEpisodeLinked()
+          ? QString("%1 — %2").arg(m->episode(), m->kitsuProjectName())
+          : m->kitsuProjectName();
+
+  QDialog dlg(this);
+  dlg.setWindowTitle(tr("Change the Kitsu link"));
+  auto *lay  = new QVBoxLayout(&dlg);
+  auto *text = new QLabel(
+      tr("This project is linked to <b>%1</b>.<br><br>"
+         "Linking it to <b>%2</b> brings that one's shots, assets and "
+         "statuses into this tracker at the next Sync, and nothing already "
+         "here is taken out.<br><br>"
+         "To confirm, type <b>%3</b>:")
+          .arg(current.toHtmlEscaped(), newTarget.toHtmlEscaped(),
+               typeThis.toHtmlEscaped()),
+      &dlg);
+  text->setWordWrap(true);
+  lay->addWidget(text);
+  auto *edit = new QLineEdit(&dlg);
+  lay->addWidget(edit);
+  auto *buttons =
+      new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+  buttons->button(QDialogButtonBox::Ok)->setText(tr("Change link"));
+  buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
+  buttons->button(QDialogButtonBox::Cancel)->setDefault(true);
+  lay->addWidget(buttons);
+  // Case-insensitive: the point is reading the name once more, not spelling.
+  connect(edit, &QLineEdit::textChanged, &dlg, [buttons, typeThis](const QString &t) {
+    buttons->button(QDialogButtonBox::Ok)
+        ->setEnabled(t.trimmed().compare(typeThis.trimmed(),
+                                         Qt::CaseInsensitive) == 0);
+  });
+  connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  if (dlg.exec() == QDialog::Accepted) return true;
+
+  m_statusLabel->setStyleSheet(QString());
+  m_statusLabel->setText(tr("Link unchanged: %1.").arg(current));
+  return false;
 }

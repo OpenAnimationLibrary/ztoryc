@@ -505,6 +505,19 @@ bool ZtoryKitsuSync::takeAutoSync() {
 ZtoryKitsuSync::ZtoryKitsuSync(QObject *parent) : QObject(parent) {
   connect(KitsuClient::instance(), &KitsuClient::loginFinished, this,
           [this](bool ok, const QString &) { m_autoSyncArmed = ok; });
+  // A show linked before it had episodes has a NAME but no episode id: the
+  // push finds or creates the episode, and binding it here is what keeps the
+  // next steps (and every later Sync) inside it. Only when nothing is bound
+  // yet: an id already chosen in the Kitsu dialog is never overwritten.
+  connect(KitsuClient::instance(), &KitsuClient::episodeResolved, this,
+          [](const QString &projectId, const QString &episodeId,
+             const QString &episodeName) {
+            ZtoryModel *m = ZtoryModel::instance();
+            if (m->kitsuProjectId() != projectId || m->isKitsuEpisodeLinked())
+              return;
+            m->setKitsuEpisode(episodeId, episodeName);
+            m->saveProjectDb();
+          });
   m_watchdog = new QTimer(this);
   m_watchdog->setSingleShot(true);
   connect(m_watchdog, &QTimer::timeout, this, [this]() {
@@ -764,6 +777,17 @@ bool ZtoryKitsuSync::start(int handles, QString *why) {
   }
   if (isRunning()) {
     if (why) *why = tr("A Sync is already running.");
+    return false;
+  }
+  // A show with neither an episode id nor a name would be read WHOLE: every
+  // episode's shots, assets and statuses into this tracker, and the Sync only
+  // adds. With a name, step 1 finds or creates the episode and binds its id
+  // (episodeResolved) before the first pull.
+  if (m->productionType() == "tvshow" && !m->isKitsuEpisodeLinked() &&
+      m->episode().trimmed().isEmpty()) {
+    if (why)
+      *why = tr("This production is a series: choose its episode in "
+                "«Connect to Kitsu…» before syncing.");
     return false;
   }
   if (!kc->hasTaskStatuses()) {
