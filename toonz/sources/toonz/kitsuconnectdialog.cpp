@@ -313,7 +313,10 @@ void KitsuConnectDialog::onLinkClicked() {
             .arg(sel.name));
     return;
   }
-  if (!sameProject || episodeId != m->kitsuEpisodeId()) {
+  // Choosing the FIRST episode of a production already linked is not a
+  // change: only leaving an episode, or the production, asks for the name.
+  if (!sameProject ||
+      (m->isKitsuEpisodeLinked() && episodeId != m->kitsuEpisodeId())) {
     // What to type: the episode when the row has one, else the production.
     const QString typeThis = episodeName.isEmpty() ? sel.name : episodeName;
     const QString target   = episodeName.isEmpty()

@@ -74,11 +74,15 @@ class ZtoryProductionPanel final : public TPanel {
   // reconnecting through the dialog is where a wrong row got linked.
   void maybeAutoConnect();
   QString m_autoConnectTried;  // project DB path already tried this session
-  // «Connect only» in the reconnect question: the Sync that follows the
-  // login is skipped once (maybeAutoSync), the connection stays.
-  bool m_skipAutoSync = false;
+  // The Sync after a login runs ONLY when asked for: «Connect and sync» in
+  // the reconnect question. Any other login — the Kitsu dialog connecting by
+  // itself with the saved password — leaves the Sync to the button, so the
+  // episode can be checked or changed first (Franco, 2026-09-29: the Sync
+  // started before he could link the episode).
+  bool m_syncAfterConnect = false;
   // «Production — Episode», or the production alone, for the Kitsu labels.
   static QString kitsuBindingText();
+  static bool kitsuEpisodeMissing();  // linked to a series, no episode
   QCheckBox    *m_kitsuHandlesCheck = nullptr;
   QSpinBox     *m_kitsuHandlesSpin  = nullptr;
   QLabel       *m_kitsuSyncLabel = nullptr;

@@ -490,7 +490,7 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
   // As soon as we're connected, pull the project's team so the assignee picker is
   // populated from Kitsu (Kitsu is authoritative on the roster while linked).
   connect(kc, &KitsuClient::loginFinished, this, [this](bool ok, const QString &) {
-    if (!ok) m_skipAutoSync = false;  // no login, no Sync to skip
+    if (!ok) m_syncAfterConnect = false;  // no login, no Sync to run
     updateKitsuButtons();  // connection line + button text + Push/Pull
     ZtoryModel *mm = ZtoryModel::instance();
     if (ok && mm->isKitsuLinked())
@@ -1320,7 +1320,8 @@ void ZtoryProductionPanel::reloadProjectTab() {
       if (!m->resolution().isEmpty())
         info += "  ·  " + m->resolution() + " @ " + QString::number(m->fps()) + "fps";
       m_kitsuLabel->setText(info);
-      m_kitsuLabel->setStyleSheet("color:#22D160;");
+      m_kitsuLabel->setStyleSheet(kitsuEpisodeMissing() ? "color:#FFB000;"
+                                                        : "color:#22D160;");
     } else {
       m_kitsuLabel->setText(tr("Not linked to Kitsu."));
       m_kitsuLabel->setStyleSheet(QString());
@@ -1352,7 +1353,10 @@ void ZtoryProductionPanel::updateKitsuButtons() {
         !loggedIn ? tr("Connect to Kitsu…")
         : bound   ? tr("● Connected — %1").arg(kitsuBindingText())
                   : tr("● Connected"));
-    m_kitsuConnectBtn->setStyleSheet(loggedIn ? "color:#22D160;" : QString());
+    m_kitsuConnectBtn->setStyleSheet(
+        !loggedIn               ? QString()
+        : kitsuEpisodeMissing() ? QString("color:#FFB000;")
+                                : QString("color:#22D160;"));
     m_kitsuConnectBtn->setToolTip(
         loggedIn ? tr("Connected as %1.\nClick for the Kitsu settings: "
                       "production, episode, statuses.")
@@ -1369,8 +1373,19 @@ void ZtoryProductionPanel::updateKitsuButtons() {
 
 QString ZtoryProductionPanel::kitsuBindingText() {
   ZtoryModel *m = ZtoryModel::instance();
-  if (!m->isKitsuEpisodeLinked()) return m->kitsuProjectName();
-  return QString("%1 — %2").arg(m->kitsuProjectName(), m->episode());
+  if (m->isKitsuEpisodeLinked())
+    return QString("%1 — %2").arg(m->kitsuProjectName(), m->episode());
+  // A series with no episode bound reads the WHOLE show: say it, instead of
+  // showing the production alone as if nothing were missing.
+  if (m->productionType() == "tvshow")
+    return tr("%1 — no episode linked").arg(m->kitsuProjectName());
+  return m->kitsuProjectName();
+}
+
+bool ZtoryProductionPanel::kitsuEpisodeMissing() {
+  ZtoryModel *m = ZtoryModel::instance();
+  return m->isKitsuLinked() && m->productionType() == "tvshow" &&
+         !m->isKitsuEpisodeLinked();
 }
 
 void ZtoryProductionPanel::maybeAutoConnect() {
@@ -1395,7 +1410,7 @@ void ZtoryProductionPanel::maybeAutoConnect() {
       tr("Connecting to Kitsu:\n\n%1\n\nthen syncing.").arg(target),
       tr("Connect and sync"), tr("Connect only"), tr("Not now"), 1);
   if (answer != 1 && answer != 2) return;  // «Not now», or the box closed
-  m_skipAutoSync = (answer == 2);
+  m_syncAfterConnect = (answer == 1);
   kc->connectAndSync();  // loginFinished -> maybeAutoSync()
 }
 
@@ -1407,10 +1422,8 @@ void ZtoryProductionPanel::maybeAutoSync() {
   if (!kc->isLoggedIn() || !kc->hasTaskStatuses()) return;
   if (!ZtoryModel::instance()->isKitsuLinked()) return;
   if (!ZtoryKitsuSync::instance()->takeAutoSync()) return;
-  if (m_skipAutoSync) {  // «Connect only»: this login's Sync, and no other
-    m_skipAutoSync = false;
-    return;
-  }
+  if (!m_syncAfterConnect) return;  // not asked for: the button does it
+  m_syncAfterConnect = false;
   onKitsuSync();
 }
 

@@ -34,6 +34,16 @@ compilate (syntax check Qt 5 su Linux e build del worktree di prova), **da colla
   primo Sync creava l'episodio ma non ne salvava l'id, e ogni pull leggeva tutti gli episodi.
   Ora lo lega (`episodeResolved`). Una serie senza episodio ne' nome non si sincronizza piu'.
 
+- **Il Sync partiva da solo aprendo il dialogo Kitsu**, prima che si potesse controllare o
+  scegliere l'episodio (Franco, stesso giorno, dopo aver compilato master): il dialogo si collega
+  da se' con la password salvata, e al collegamento scattava il Sync automatico del 27/09. Ora il
+  Sync dopo un collegamento parte SOLO con «Connect and sync» nella domanda all'apertura del
+  tracker; per il resto lo fa il pulsante.
+- **L'episodio non si vedeva** quando una serie e' legata senza episodio: il pulsante diceva solo
+  la produzione. Ora «● Connected — PRODUZIONE — no episode linked», in arancione, e cosi' la riga
+  «Linked». Scegliere il PRIMO episodio di una produzione gia' legata non chiede piu' di scrivere
+  il nome: la conferma resta per il passaggio da un episodio o da una produzione a un'altra.
+
 ### Added
 - **Diagnostica del render** con `ZTORYC_PLASTIC_DIAG=1`: una riga `LEVELRENDER` per ogni
   immagine di livello caricata (livello, fotogramma, percorso, impronta) e una `PLASTICRENDER` per
