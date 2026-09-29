@@ -73,6 +73,8 @@ class ZtoryProductionPanel final : public TPanel {
   // saved scene of it is opened (not at start-up: the app may sit on another
   // project). The binding is the project's, not the dialog's.
   void maybeAutoConnect();
+  // The gate in front of it: a saved scene is open and the tracker is visible.
+  void maybeAutoConnectForScene();
   QString m_autoConnectTried;  // project DB path already tried this session
   // The Sync after a login runs ONLY when asked for: «Connect and sync» in
   // the reconnect question. Any other login — the Kitsu dialog connecting by

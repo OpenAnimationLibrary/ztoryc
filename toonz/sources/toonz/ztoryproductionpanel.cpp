@@ -496,15 +496,7 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
   // Deferred: the question is modal and the scene is still being set up.
   connect(TApp::instance()->getCurrentScene(), &TSceneHandle::sceneSwitched,
           this, [this]() {
-            QTimer::singleShot(0, this, [this]() {
-              ToonzScene *sc = TApp::instance()->getCurrentScene()->getScene();
-              if (!sc || sc->isUntitled()) return;
-              // This scene's project, not the one the panel last showed.
-              ZtoryModel::instance()->loadProjectDb();
-              reloadProjectTab();
-              updateKitsuButtons();
-              maybeAutoConnect();
-            });
+            QTimer::singleShot(0, this, [this]() { maybeAutoConnectForScene(); });
           });
   connect(kc, &KitsuClient::loginFinished, this, [this](bool ok, const QString &) {
     if (!ok) m_syncAfterConnect = false;  // no login, no Sync to run
@@ -555,6 +547,10 @@ void ZtoryProductionPanel::showEvent(QShowEvent *e) {
   // This also picks up a project switch made while the tracker was hidden.
   ZtoryModel::instance()->loadProjectDb();
   onModelChanged();  // rebuild every tab from the freshly loaded DB
+  // Also when the tracker comes into view AFTER a scene was opened (its room
+  // may be built later than the scene load, or entered by hand): the scene
+  // test inside keeps it silent at start-up.
+  QTimer::singleShot(0, this, [this]() { maybeAutoConnectForScene(); });
 
   // Show the exit bar only when this tracker IS the standalone Production room.
   // Gate on the room *choice* ("Production", the room-set folder name), not the
@@ -1416,6 +1412,17 @@ bool ZtoryProductionPanel::kitsuEpisodeMissing() {
   ZtoryModel *m = ZtoryModel::instance();
   return m->isKitsuLinked() && m->productionType() == "tvshow" &&
          !m->isKitsuEpisodeLinked();
+}
+
+void ZtoryProductionPanel::maybeAutoConnectForScene() {
+  if (!isVisible()) return;  // asked where it can be read, in the tracker
+  ToonzScene *sc = TApp::instance()->getCurrentScene()->getScene();
+  if (!sc || sc->isUntitled()) return;  // no scene chosen yet: say nothing
+  // This scene's project, not the one the panel last showed.
+  ZtoryModel::instance()->loadProjectDb();
+  reloadProjectTab();
+  updateKitsuButtons();
+  maybeAutoConnect();
 }
 
 void ZtoryProductionPanel::maybeAutoConnect() {

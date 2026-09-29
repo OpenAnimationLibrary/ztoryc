@@ -62,7 +62,14 @@ compilate (syntax check Qt 5 su Linux e build del worktree di prova), **da colla
   Pack vanno spostati a mano su Kitsu (una volta).
 - **La domanda di connessione compariva all'avvio**, sul progetto su cui l'app si apre, che non e'
   per forza quello su cui si lavora. Ora compare all'apertura di una scena salvata, dopo aver
-  ricaricato il progetto di quella scena.
+  ricaricato il progetto di quella scena. Seconda versione, dopo il collaudo di Franco (con il
+  solo segnale di cambio scena non compariva mai: il tracker sta solo nei workflow Storyboard e
+  Character e la sua room nasce dopo il caricamento): compare quando c'e' una scena salvata E il
+  tracker e' visibile, al cambio scena o quando il tracker viene mostrato.
+- Nota dal collaudo: rinominare nel tracker un asset gia' collegato a Kitsu tiene il collegamento
+  (e' voluto: il legame e' per id), ma il Sync non rinomina l'asset su Kitsu. «manette» era un
+  «New asset» di Cascina rinominato: collegato a un asset di Cascina, non creato. Da decidere se il
+  Sync debba propagare i nomi.
 
 ### Added
 - **Diagnostica del render** con `ZTORYC_PLASTIC_DIAG=1`: una riga `LEVELRENDER` per ogni
