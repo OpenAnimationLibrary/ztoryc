@@ -131,6 +131,13 @@ unsigned long long rasterHash(const TRasterP &ras) {
   return h;
 }
 
+std::string rectStr(const TRectD &r) {
+  char buf[96];
+  snprintf(buf, sizeof buf, "[%.0f,%.0f %.0fx%.0f]", r.x0, r.y0, r.getLx(),
+           r.getLy());
+  return buf;
+}
+
 std::string hex(unsigned long long v) {
   char buf[20];
   snprintf(buf, sizeof buf, "%016llx", v);
@@ -397,7 +404,13 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
                ::to_string(meshSl->getName()) + "' meshFid=" + meshFid.expand() +
                " tex='" + texName + "' texFid=" + texFrame + " in=" +
                std::to_string(tileSize.lx) + "x" + std::to_string(tileSize.ly) +
-               " inHash=" + hex(rasterHash(inTile.getRaster()));
+               " inHash=" + hex(rasterHash(inTile.getRaster())) +
+               " texBBox=" + rectStr(texBBox) + " meshBBox=" + rectStr(meshBBox) +
+               " tile=" + std::to_string(tile.getRaster()->getLx()) + "x" +
+               std::to_string(tile.getRaster()->getLy()) + "@" +
+               std::to_string((int)tile.m_pos.x) + "," +
+               std::to_string((int)tile.m_pos.y) +
+               " mask=" + std::to_string((int)info.m_applyMask);
   }
 
   // Draw the textured mesh using the working approach
@@ -476,20 +489,40 @@ void PlasticDeformerFx::doCompute(TTile &tile, double frame,
     // the render matches the viewer.
     const TAffine &squashCtrl =
         sd->getSquashControllerAffine(sd->skeletonId(sdFrame), sdFrame);
-    tglMultMatrix(TTranslation(-tile.m_pos) * info.m_affine *
-                  meshToWorldMeshAff * worldMeshToMeshAff * squashCtrl *
-                  meshToWorldMeshAff);
+    const TAffine meshToTileAff = TTranslation(-tile.m_pos) * info.m_affine *
+                                  meshToWorldMeshAff * worldMeshToMeshAff *
+                                  squashCtrl * meshToWorldMeshAff;
+    tglMultMatrix(meshToTileAff);
+    // Where the (undeformed) mesh lands in the tile, in pixels: a piece that
+    // comes out empty with a full input is either off the tile or lost in GL.
+    if (!diagLine.empty())
+      diagLine += " meshInTile=" + rectStr(meshToTileAff * mi->getBBox()) +
+                  " texTiles=" + std::to_string(texData->m_tileDatas.size());
 
     glEnable(GL_BLEND);
     glEnable(GL_TEXTURE_2D);
 
     // Draw the mesh
     tglDraw(*mi, *texData, meshToTextureAff, *dataGroup, info.m_applyMask);
+    if (!diagLine.empty())
+      diagLine += " glErr=" + std::to_string((int)glGetError());
 
     // Retrieve drawing and copy to output tile
 
     QImage img = fb.toImage().scaled(QSize(d.lx, d.ly), Qt::IgnoreAspectRatio,
                                      Qt::SmoothTransformation);
+    if (!diagLine.empty()) {
+      // Drawn pixels in the FBO, before the copy and the mask: zero here means
+      // the draw itself left nothing.
+      long drawn = 0;
+      for (int y = 0; y < img.height(); ++y) {
+        const QRgb *line = reinterpret_cast<const QRgb *>(img.constScanLine(y));
+        for (int x = 0; x < img.width(); ++x)
+          if (qAlpha(line[x])) ++drawn;
+      }
+      diagLine += " fboPixels=" + std::to_string(drawn) + " fmt=" +
+                  std::to_string((int)img.format());
+    }
     int wrap      = tile.getRaster()->getLx() * sizeof(TPixel32);
     if (!m_was64bit) {
       uchar *srcPix = img.bits();
