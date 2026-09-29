@@ -490,6 +490,22 @@ ZtoryProductionPanel::ZtoryProductionPanel(QWidget *parent) : TPanel(parent) {
   });
   // As soon as we're connected, pull the project's team so the assignee picker is
   // populated from Kitsu (Kitsu is authoritative on the roster while linked).
+  // The reconnect question waits for a SCENE: at start-up the app may be on
+  // a project nobody is going to work on (Franco, 2026-09-29), so asking
+  // there named the wrong production. A saved scene says which project it is.
+  // Deferred: the question is modal and the scene is still being set up.
+  connect(TApp::instance()->getCurrentScene(), &TSceneHandle::sceneSwitched,
+          this, [this]() {
+            QTimer::singleShot(0, this, [this]() {
+              ToonzScene *sc = TApp::instance()->getCurrentScene()->getScene();
+              if (!sc || sc->isUntitled()) return;
+              // This scene's project, not the one the panel last showed.
+              ZtoryModel::instance()->loadProjectDb();
+              reloadProjectTab();
+              updateKitsuButtons();
+              maybeAutoConnect();
+            });
+          });
   connect(kc, &KitsuClient::loginFinished, this, [this](bool ok, const QString &) {
     if (!ok) m_syncAfterConnect = false;  // no login, no Sync to run
     updateKitsuButtons();  // connection line + button text + Push/Pull
@@ -539,9 +555,6 @@ void ZtoryProductionPanel::showEvent(QShowEvent *e) {
   // This also picks up a project switch made while the tracker was hidden.
   ZtoryModel::instance()->loadProjectDb();
   onModelChanged();  // rebuild every tab from the freshly loaded DB
-  // After the show, not inside it: the question is modal and the room is
-  // still being laid out.
-  QTimer::singleShot(0, this, [this]() { maybeAutoConnect(); });
 
   // Show the exit bar only when this tracker IS the standalone Production room.
   // Gate on the room *choice* ("Production", the room-set folder name), not the

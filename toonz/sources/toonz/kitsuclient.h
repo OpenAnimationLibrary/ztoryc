@@ -358,7 +358,11 @@ public:
   // (upsert by type+name, resolving each canonical type onto a Kitsu asset-type)
   // -> assetsPushed(). pullAssets fetches the project's assets so ones authored
   // in Kitsu can be imported into the tracker -> assetsPulled().
-  void pushAssets(const QString &projectId, const QVector<KitsuAsset> &assets);
+  // episodeId: on a series, the episode the NEW assets are created in. Empty
+  // = no episode, which on a tvshow means the Main Pack — shared by every
+  // episode, so every episode's Sync pulls it in.
+  void pushAssets(const QString &projectId, const QVector<KitsuAsset> &assets,
+                  const QString &episodeId = QString());
   // `episodeId` restricts the pull to the assets of one episode of a tvshow.
   // Assets with no episode are the show's and always come through.
   void pullAssets(const QString &projectId,
@@ -610,6 +614,7 @@ private:
   void asPullFail(const QString &message);
 
   QString m_asProjectId;
+  QString m_asEpisodeId;  // episode the pushed NEW assets are created in
   QVector<KitsuAsset>     m_asQueue;
   QHash<QString, QString> m_asTypeIdByName;  // asset-type name(lower) -> id (push)
   QHash<QString, QString> m_asTypeNameById;  // id -> asset-type name    (pull)

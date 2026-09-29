@@ -52,6 +52,18 @@ compilate (syntax check Qt 5 su Linux e build del worktree di prova), **da colla
   riepilogo finale ripetono la destinazione, e cosi' la conferma prima di un invio grosso. Alla
   riconnessione, senza episodio si offre solo «Connect».
 
+- **Asset di un episodio finiti nel Main Pack di Kitsu** (gli asset di Cascina ricomparsi nel
+  tracker di Messina a ogni Sync). Il Sync creava gli asset nuovi su Kitsu SENZA episodio: in una
+  serie vanno nel Main Pack, condiviso da tutti gli episodi, e il pull di ogni episodio li riporta
+  giustamente dentro. Ora, con un episodio legato, li crea in quell'episodio (`episode_id`, il
+  campo del client ufficiale gazu; da verificare con un asset di prova). E l'aggancio per
+  tipo+nome a un asset gia' esistente guarda solo l'episodio legato e il Main Pack: prima un
+  personaggio omonimo di un altro episodio veniva preso per il nostro. Gli asset gia' nel Main
+  Pack vanno spostati a mano su Kitsu (una volta).
+- **La domanda di connessione compariva all'avvio**, sul progetto su cui l'app si apre, che non e'
+  per forza quello su cui si lavora. Ora compare all'apertura di una scena salvata, dopo aver
+  ricaricato il progetto di quella scena.
+
 ### Added
 - **Diagnostica del render** con `ZTORYC_PLASTIC_DIAG=1`: una riga `LEVELRENDER` per ogni
   immagine di livello caricata (livello, fotogramma, percorso, impronta) e una `PLASTICRENDER` per

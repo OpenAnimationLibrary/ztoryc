@@ -1284,13 +1284,15 @@ void KitsuClient::asPushFail(const QString &message) {
 }
 
 void KitsuClient::pushAssets(const QString &projectId,
-                             const QVector<KitsuAsset> &assets) {
+                             const QVector<KitsuAsset> &assets,
+                             const QString &episodeId) {
   if (!isLoggedIn()) { emit assetsPushed(false, 0, 0, tr("Not logged in.")); return; }
   if (projectId.isEmpty() || assets.isEmpty()) {
     emit assetsPushed(true, 0, 0, tr("No assets to push."));
     return;
   }
   m_asProjectId = projectId;
+  m_asEpisodeId = episodeId;
   m_asQueue     = assets;
   m_asTypeIdByName.clear();
   m_asExisting.clear();
@@ -1326,6 +1328,12 @@ void KitsuClient::asPushLoadAssets() {
     if (r->error() != QNetworkReply::NoError) { asPushFail(errorMessage(r, b)); return; }
     for (const QJsonValue &v : QJsonDocument::fromJson(b).array()) {
       const QJsonObject o = v.toObject();
+      // Matched by type+name: on a series, only among THIS episode's assets
+      // and the Main Pack. Across the whole show, a character with the same
+      // name in another episode would be taken for ours and linked to it.
+      const QString src = o.value("source_id").toString();
+      if (!m_asEpisodeId.isEmpty() && !src.isEmpty() && src != m_asEpisodeId)
+        continue;
       m_asExisting.insert(o.value("entity_type_id").toString() + "/" +
                               o.value("name").toString().toLower(),
                           o.value("id").toString());
@@ -1366,6 +1374,11 @@ void KitsuClient::asPushProcessNext() {
     body["name"]        = a.name;
     body["description"] = "";
     body["data"]        = QJsonObject();
+    // Created WITHOUT an episode, an asset of a series lands in the Main Pack
+    // and every episode's Sync pulls it in: Cascina's characters turned up in
+    // Messina's tracker (Franco, 2026-09-29). `episode_id` is the field the
+    // official client (gazu new_asset) sends; Zou stores it as source_id.
+    if (!m_asEpisodeId.isEmpty()) body["episode_id"] = m_asEpisodeId;
     QNetworkReply *r = authPost("/api/data/projects/" + m_asProjectId +
                                     "/asset-types/" + typeId + "/assets/new",
                                 QJsonDocument(body).toJson(QJsonDocument::Compact));

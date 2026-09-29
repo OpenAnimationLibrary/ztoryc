@@ -857,7 +857,7 @@ void ZtoryKitsuSync::advance(bool ok, const QString &msg) {
     const QVector<KitsuAsset> assets = KitsuClient::buildAssetsFromModel();
     if (assets.isEmpty()) break;
     m_pendingAssetTasks = KitsuClient::buildAssetTasksFromModel();
-    kc->pushAssets(m->kitsuProjectId(), assets);
+    kc->pushAssets(m->kitsuProjectId(), assets, m->kitsuEpisodeId());
     return;
   }
   case 3:

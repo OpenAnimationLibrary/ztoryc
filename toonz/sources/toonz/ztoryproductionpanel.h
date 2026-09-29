@@ -69,9 +69,9 @@ class ZtoryProductionPanel final : public TPanel {
   QPushButton  *m_kitsuSyncBtn = nullptr;
   void onKitsuSync();
   void maybeAutoSync();  // once per login, when the statuses are there
-  // A linked project reconnects by itself when the tracker opens, with the
-  // saved credentials: the binding is the project's, not the dialog's, and
-  // reconnecting through the dialog is where a wrong row got linked.
+  // A linked project offers to reconnect, with the saved credentials, when a
+  // saved scene of it is opened (not at start-up: the app may sit on another
+  // project). The binding is the project's, not the dialog's.
   void maybeAutoConnect();
   QString m_autoConnectTried;  // project DB path already tried this session
   // The Sync after a login runs ONLY when asked for: «Connect and sync» in
